@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 
 export type ToastType = "success" | "error"
 
@@ -27,7 +27,7 @@ export function Toast({ message, type, onClose }: ToastProps) {
 
 export function useToast() {
   const [toast, setToast] = useState<{ message: string; type: ToastType } | null>(null)
-  const show = (message: string, type: ToastType = "success") => setToast({ message, type })
-  const hide = () => setToast(null)
+  const show = useCallback((message: string, type: ToastType = "success") => setToast({ message, type }), [])
+  const hide = useCallback(() => setToast(null), [])
   return { toast, show, hide }
 }
