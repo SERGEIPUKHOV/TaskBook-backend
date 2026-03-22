@@ -9,6 +9,8 @@ from app.schemas.habit import HabitGridOut, HabitOut
 
 
 class MonthPlanIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     main_goal: str | None = None
     focuses: list[str] = Field(default_factory=list)
     innovations: list[str] = Field(default_factory=list)
@@ -34,6 +36,6 @@ class MonthPlanOut(MonthPlanIn):
 
 class MonthBundleOut(BaseModel):
     plan: MonthPlanOut | None
-    states: list[DailyStateOut]
-    habits: list[HabitOut]
+    states: list[DailyStateOut] = Field(default_factory=list)
+    habits: list[HabitOut] = Field(default_factory=list)
     grid: HabitGridOut

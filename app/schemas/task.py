@@ -3,10 +3,14 @@ from __future__ import annotations
 from datetime import date
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+TaskStatus = Literal["done", "moved", "failed", "planned"]
 
 
 class TaskIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     title: str = Field(default="", max_length=500)
     time_planned: int | None = Field(default=None, ge=0)
     time_actual: int | None = Field(default=None, ge=0)
@@ -15,6 +19,8 @@ class TaskIn(BaseModel):
 
 
 class TaskPatch(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     title: str | None = Field(default=None, max_length=500)
     time_planned: int | None = Field(default=None, ge=0)
     time_actual: int | None = Field(default=None, ge=0)
@@ -23,14 +29,20 @@ class TaskPatch(BaseModel):
 
 
 class TaskDayStatusIn(BaseModel):
-    status: Literal["done", "moved", "failed", "planned"]
+    model_config = ConfigDict(extra="ignore")
+
+    status: TaskStatus
 
 
 class ReorderIn(BaseModel):
-    task_ids: list[str]
+    model_config = ConfigDict(extra="ignore")
+
+    task_ids: list[str] = Field(default_factory=list)
 
 
 class TaskOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     title: str
     time_planned: int | None
@@ -39,10 +51,12 @@ class TaskOut(BaseModel):
     order: int
     start_day: int | None
     carried_from_task_id: str | None
-    statuses: dict[str, str]
+    statuses: dict[str, TaskStatus] = Field(default_factory=dict)
 
 
 class TaskDayStatusOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     task_id: str
     date: date
-    status: str
+    status: TaskStatus

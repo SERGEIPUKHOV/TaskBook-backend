@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 import secrets
 import string
 from uuid import uuid4
@@ -9,34 +8,32 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_admin
+from app.api.v1.admin.deps import require_admin
 from app.core.database import get_db
 from app.core.redis import redis_client
 from app.core.security import hash_password
-from app.models.habit import Habit
 from app.models.task import Task
 from app.models.user import User
 from app.schemas.admin import (
     AdminUserOut,
     AdminUsersPageOut,
     ImpersonateOut,
-    PlatformStatsOut,
     ResetPasswordOut,
     SetActiveIn,
     SetEmailIn,
 )
 from app.schemas.common import Response
 
-# BLOCK-START: ADMIN_API_MODULE
-# Description: Administrative routes for user moderation, impersonation, and platform-level statistics.
+# BLOCK-START: ADMIN_USERS_MODULE
+# Description: Admin endpoints for user search, moderation, credentials reset, and impersonation.
 router = APIRouter()
 IMPERSONATE_KEY = "impersonate:{code}"
 TEMP_PASSWORD_ALPHABET = string.ascii_letters + string.digits
 TEMP_PASSWORD_LENGTH = 12
 
 
-# BLOCK-START: ADMIN_HELPERS
-# Description: Shared helper functions for admin response shaping and mutation guards.
+# BLOCK-START: ADMIN_USER_HELPERS
+# Description: Shared helpers for admin user responses and mutation guards.
 def build_admin_user_out(user: User, tasks_count: int) -> AdminUserOut:
     return AdminUserOut(
         id=user.id,
@@ -72,7 +69,7 @@ def ensure_admin_target_allowed(current_admin: User, user: User) -> None:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot modify another admin account",
         )
-# BLOCK-END: ADMIN_HELPERS
+# BLOCK-END: ADMIN_USER_HELPERS
 
 
 # BLOCK-START: ADMIN_USER_LIST_ENDPOINT
@@ -273,44 +270,4 @@ async def impersonate_user(
     await redis_client.set(IMPERSONATE_KEY.format(code=code), user.id, ex=120)
     return Response(data=ImpersonateOut(code=code))
 # BLOCK-END: ADMIN_IMPERSONATION_ENDPOINT
-
-
-# BLOCK-START: ADMIN_STATS_ENDPOINT
-# Description: Returns platform-level counts for users, recent activity, tasks, and habits.
-@router.get("/stats", response_model=Response[PlatformStatsOut])
-async def get_stats(
-    db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_admin),
-) -> Response[PlatformStatsOut]:
-    """
-    function_contracts:
-      get_stats:
-        description: "Returns high-level platform statistics for admin dashboard widgets."
-        preconditions:
-          - "Authenticated requester is an admin"
-        postconditions:
-          - "Returns counts for total users, active_7d, total tasks, and total habits"
-    """
-    seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
-    total_users = int((await db.scalar(select(func.count()).select_from(User))) or 0)
-    active_7d = int(
-        (
-            await db.scalar(
-                select(func.count()).select_from(User).where(User.last_login >= seven_days_ago),
-            )
-        )
-        or 0
-    )
-    total_tasks = int((await db.scalar(select(func.count()).select_from(Task))) or 0)
-    total_habits = int((await db.scalar(select(func.count()).select_from(Habit))) or 0)
-
-    return Response(
-        data=PlatformStatsOut(
-            total_users=total_users,
-            active_7d=active_7d,
-            total_tasks=total_tasks,
-            total_habits=total_habits,
-        ),
-    )
-# BLOCK-END: ADMIN_STATS_ENDPOINT
-# BLOCK-END: ADMIN_API_MODULE
+# BLOCK-END: ADMIN_USERS_MODULE

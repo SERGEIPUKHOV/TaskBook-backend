@@ -28,7 +28,10 @@ HTTP слой TaskBook API.
 | `tasks.py` | Patch/delete task и day statuses |
 | `days.py` | Day bundle, key events, gratitudes |
 | `dashboard.py` | Dashboard summary |
-| `admin.py` | Admin users actions и platform stats |
+| `admin/__init__.py` | Единый admin router package и сборка subrouters |
+| `admin/users.py` | Admin users actions, password reset, impersonation |
+| `admin/stats.py` | Platform stats для admin dashboard |
+| `admin/deps.py` | Admin-specific dependency boundary (`require_admin`) |
 
 Связанный shared deps module расположен уровнем выше: `backend/app/api/deps.py`.
 
@@ -52,4 +55,4 @@ HTTP слой TaskBook API.
 
 ## Критичные точки изменения
 - Любое изменение URL, auth behaviour или response shape потенциально ломает frontend и admin.
-- Изменения в `auth.py` и `admin.py` требуют повышенной осторожности из-за безопасности и прав доступа.
+- Изменения в `auth.py` и `admin/` требуют повышенной осторожности из-за безопасности и прав доступа.
