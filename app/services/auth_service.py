@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 
 from fastapi import HTTPException, status
 from jose import JWTError
@@ -22,6 +23,7 @@ from app.schemas.auth import AuthResponseOut, AuthUserOut
 from app.services.habit_service import seed_default_habits_for_user
 
 REFRESH_KEY = "refresh:{user_id}:{jti}"
+logger = logging.getLogger(__name__)
 
 
 async def get_user_by_email(db: AsyncSession, email: str) -> User | None:
@@ -60,9 +62,11 @@ async def issue_auth_tokens(user: User) -> AuthResponseOut:
 
 async def register_user(db: AsyncSession, email: str, password: str) -> AuthResponseOut:
     normalized_email = email.strip().lower()
+    logger.info("[AUTH][REGISTER][ATTEMPT] email=%s", normalized_email)
     existing = await get_user_by_email(db, normalized_email)
 
     if existing:
+        logger.warning("[AUTH][REGISTER][FAILED] email=%s reason=DUPLICATE_EMAIL", normalized_email)
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Пользователь с таким email уже существует")
 
     user = User(email=normalized_email, hashed_password=hash_password(password))
@@ -71,22 +75,28 @@ async def register_user(db: AsyncSession, email: str, password: str) -> AuthResp
     await seed_default_habits_for_user(db, user.id)
     await db.commit()
     await db.refresh(user)
+    logger.info("[AUTH][REGISTER][SUCCESS] user_id=%s", user.id)
     return await issue_auth_tokens(user)
 
 
 async def login_user(db: AsyncSession, email: str, password: str) -> AuthResponseOut:
-    user = await get_user_by_email(db, email)
+    normalized_email = email.strip().lower()
+    logger.info("[AUTH][LOGIN][ATTEMPT] email=%s", normalized_email)
+    user = await get_user_by_email(db, normalized_email)
 
     if user is None or not verify_password(password, user.hashed_password):
+        logger.warning("[AUTH][LOGIN][FAILED] email=%s reason=INVALID_CREDENTIALS", normalized_email)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Неверный email или пароль")
 
     if not user.is_active:
+        logger.warning("[AUTH][LOGIN][FAILED] email=%s reason=INACTIVE_ACCOUNT", normalized_email)
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Аккаунт заблокирован")
 
     user.last_login = datetime.now(timezone.utc)
     db.add(user)
     await db.commit()
     await db.refresh(user)
+    logger.info("[AUTH][LOGIN][SUCCESS] user_id=%s", user.id)
     return await issue_auth_tokens(user)
 
 
@@ -94,22 +104,27 @@ async def refresh_session(db: AsyncSession, refresh_token: str) -> AuthResponseO
     try:
         payload = decode_token(refresh_token)
     except JWTError as exc:
+        logger.warning("[AUTH][REFRESH][FAILED] reason=INVALID_TOKEN")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized") from exc
 
     if payload.get("type") != "refresh":
+        logger.warning("[AUTH][REFRESH][FAILED] reason=WRONG_TOKEN_TYPE")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
 
     user_id = str(payload.get("sub", ""))
     jti = str(payload.get("jti", ""))
     if not user_id or not jti or not await is_refresh_token_valid(user_id, jti):
+        logger.warning("[AUTH][REFRESH][FAILED] user_id=%s reason=TOKEN_REVOKED_OR_MISSING", user_id or "unknown")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
 
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if user is None or not user.is_active:
+        logger.warning("[AUTH][REFRESH][FAILED] user_id=%s reason=USER_NOT_ACTIVE", user_id)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
 
     await revoke_refresh_token(user_id, jti)
+    logger.info("[AUTH][REFRESH][SUCCESS] user_id=%s", user.id)
     return await issue_auth_tokens(user)
 
 

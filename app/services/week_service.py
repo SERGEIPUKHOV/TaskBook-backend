@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+import logging
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
@@ -12,15 +13,45 @@ from app.schemas.week import WeekOut, WeekPatch
 from app.services.cache_service import invalidate_dashboard
 from app.services.periods import previous_week_reference, validate_week, week_bounds
 
+logger = logging.getLogger(__name__)
 
+
+# BLOCK-START: WEEK_SERVICE_MODULE
+# Description: Week service with ISO-week validation, carry-over synchronization, serialization, and update flows.
+# BLOCK-START: WEEK_VALIDATION_HELPER
+# Description: Validates ISO week reference and translates validation failures to HTTP 422.
 def _ensure_valid_week(year: int, week_number: int) -> None:
+    """
+    function_contracts:
+      _ensure_valid_week:
+        description: "Validates ISO week input and raises HTTPException for invalid year/week pairs."
+        preconditions:
+          - "year: integer ISO year"
+          - "week_number: integer ISO week number"
+        postconditions:
+          - "Returns None for valid ISO week references"
+          - "Raises HTTP 422 when week reference is invalid"
+    """
     try:
         validate_week(year, week_number)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+# BLOCK-END: WEEK_VALIDATION_HELPER
 
 
+# BLOCK-START: WEEK_SERIALIZATION_HELPER
+# Description: Serializes Week ORM record into API schema with computed ISO date bounds.
 def serialize_week(record: Week) -> WeekOut:
+    """
+    function_contracts:
+      serialize_week:
+        description: "Converts Week ORM model into WeekOut with computed ISO week bounds."
+        preconditions:
+          - "record.year and record.week_number describe a valid ISO week"
+        postconditions:
+          - "Returns WeekOut with date_from and date_to"
+          - "Raises HTTP 422 when stored week reference is invalid"
+    """
     _ensure_valid_week(record.year, record.week_number)
     date_from, date_to = week_bounds(record.year, record.week_number)
     return WeekOut(
@@ -32,9 +63,23 @@ def serialize_week(record: Week) -> WeekOut:
         date_from=date_from,
         date_to=date_to,
     )
+# BLOCK-END: WEEK_SERIALIZATION_HELPER
 
 
+# BLOCK-START: WEEK_CARRY_OVER_SYNC
+# Description: Syncs tasks moved from the previous Sunday into the current week and removes stale carry-over tasks.
 async def _sync_carry_over_tasks(db: AsyncSession, user_id: str, week: Week) -> bool:
+    """
+    function_contracts:
+      _sync_carry_over_tasks:
+        description: "Copies eligible moved tasks from the previous week and removes stale carry-over entries."
+        preconditions:
+          - "week: persisted Week record or flushed Week instance"
+          - "user_id: current user identifier"
+        postconditions:
+          - "Returns True when carry-over tasks were added or removed"
+          - "Returns False when there is nothing to sync"
+    """
     previous_year, previous_week_number = previous_week_reference(week.year, week.week_number)
     previous_week_result = await db.execute(
         select(Week).where(
@@ -153,37 +198,70 @@ async def _sync_carry_over_tasks(db: AsyncSession, user_id: str, week: Week) -> 
         changed = True
 
     return changed
+# BLOCK-END: WEEK_CARRY_OVER_SYNC
 
 
+# BLOCK-START: WEEK_GET_OR_CREATE_FLOW
+# Description: Loads an existing week or creates it on first access, including carry-over synchronization and LDD logs.
 async def get_or_create_week(db: AsyncSession, user_id: str, year: int, week_number: int) -> Week:
-    _ensure_valid_week(year, week_number)
-    result = await db.execute(
-        select(Week).where(
-            Week.user_id == user_id,
-            Week.year == year,
-            Week.week_number == week_number,
-        ),
-    )
-    record = result.scalar_one_or_none()
-    if record is not None:
+    """
+    function_contracts:
+      get_or_create_week:
+        description: "Returns an existing week or creates a new one, synchronizing carry-over tasks from the previous ISO week."
+        preconditions:
+          - "db: active AsyncSession"
+          - "user_id: current user identifier"
+          - "year/week_number: valid ISO week reference"
+        postconditions:
+          - "Returns persisted Week instance"
+          - "Creates week when it does not exist"
+          - "Invalidates dashboard cache when carry-over sync changes visible task state"
+    """
+    logger.info("[WEEK][GET_OR_CREATE][START] user_id=%s year=%s week=%s", user_id, year, week_number)
+    try:
+        _ensure_valid_week(year, week_number)
+        result = await db.execute(
+            select(Week).where(
+                Week.user_id == user_id,
+                Week.year == year,
+                Week.week_number == week_number,
+            ),
+        )
+        record = result.scalar_one_or_none()
+        if record is not None:
+            added = await _sync_carry_over_tasks(db, user_id, record)
+            if added:
+                await db.commit()
+                await db.refresh(record)
+                await invalidate_dashboard(user_id)
+                logger.info("[WEEK][GET_OR_CREATE][SYNCED] user_id=%s week_id=%s", user_id, record.id)
+            else:
+                logger.debug("[WEEK][GET_OR_CREATE][FOUND] user_id=%s week_id=%s", user_id, record.id)
+            return record
+
+        record = Week(user_id=user_id, year=year, week_number=week_number, focus="", reward="")
+        db.add(record)
+        await db.flush()
         added = await _sync_carry_over_tasks(db, user_id, record)
+        await db.commit()
+        await db.refresh(record)
         if added:
-            await db.commit()
-            await db.refresh(record)
             await invalidate_dashboard(user_id)
+        logger.info(
+            "[WEEK][GET_OR_CREATE][CREATED] user_id=%s week_id=%s carry_over=%s",
+            user_id,
+            record.id,
+            added,
+        )
         return record
-
-    record = Week(user_id=user_id, year=year, week_number=week_number, focus="", reward="")
-    db.add(record)
-    await db.flush()
-    added = await _sync_carry_over_tasks(db, user_id, record)
-    await db.commit()
-    await db.refresh(record)
-    if added:
-        await invalidate_dashboard(user_id)
-    return record
+    except Exception:
+        logger.exception("[WEEK][GET_OR_CREATE][FAILED] user_id=%s year=%s week=%s", user_id, year, week_number)
+        raise
+# BLOCK-END: WEEK_GET_OR_CREATE_FLOW
 
 
+# BLOCK-START: WEEK_UPDATE_FLOW
+# Description: Applies editable patch fields to a week and invalidates dashboard cache.
 async def update_week(
     db: AsyncSession,
     user_id: str,
@@ -191,22 +269,56 @@ async def update_week(
     week_number: int,
     patch: WeekPatch,
 ) -> WeekOut:
-    record = await get_or_create_week(db, user_id, year, week_number)
-    if patch.focus is not None:
-        record.focus = patch.focus
-    if patch.reward is not None:
-        record.reward = patch.reward
-    db.add(record)
-    await db.commit()
-    await db.refresh(record)
-    await invalidate_dashboard(user_id)
-    return serialize_week(record)
+    """
+    function_contracts:
+      update_week:
+        description: "Updates editable week reflection fields and returns serialized week data."
+        preconditions:
+          - "patch.focus and patch.reward are optional string fields"
+          - "year/week_number identify an ISO week for the current user"
+        postconditions:
+          - "Week record exists after the call"
+          - "Updated fields are persisted"
+          - "Dashboard cache is invalidated"
+    """
+    logger.info("[WEEK][UPDATE][START] user_id=%s year=%s week=%s", user_id, year, week_number)
+    try:
+        record = await get_or_create_week(db, user_id, year, week_number)
+        if patch.focus is not None:
+            record.focus = patch.focus
+        if patch.reward is not None:
+            record.reward = patch.reward
+        db.add(record)
+        await db.commit()
+        await db.refresh(record)
+        await invalidate_dashboard(user_id)
+        logger.info("[WEEK][UPDATE][SUCCESS] user_id=%s week_id=%s", user_id, record.id)
+        return serialize_week(record)
+    except Exception:
+        logger.exception("[WEEK][UPDATE][FAILED] user_id=%s year=%s week=%s", user_id, year, week_number)
+        raise
+# BLOCK-END: WEEK_UPDATE_FLOW
 
 
+# BLOCK-START: WEEK_LOOKUP_HELPER
+# Description: Retrieves one week owned by the current user or raises HTTP 404.
 async def get_week_for_user(db: AsyncSession, user_id: str, task_or_week_id: str, by_week_id: bool = True) -> Week:
+    """
+    function_contracts:
+      get_week_for_user:
+        description: "Fetches one Week record scoped to the current user."
+        preconditions:
+          - "task_or_week_id: persisted week identifier"
+          - "user_id: current user identifier"
+        postconditions:
+          - "Returns Week when found"
+          - "Raises HTTP 404 when week is missing"
+    """
     field = Week.id if by_week_id else Week.id
     result = await db.execute(select(Week).where(field == task_or_week_id, Week.user_id == user_id))
     record = result.scalar_one_or_none()
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Week not found")
     return record
+# BLOCK-END: WEEK_LOOKUP_HELPER
+# BLOCK-END: WEEK_SERVICE_MODULE

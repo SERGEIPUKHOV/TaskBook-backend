@@ -27,12 +27,16 @@ from app.schemas.admin import (
 )
 from app.schemas.common import Response
 
+# BLOCK-START: ADMIN_API_MODULE
+# Description: Administrative routes for user moderation, impersonation, and platform-level statistics.
 router = APIRouter()
 IMPERSONATE_KEY = "impersonate:{code}"
 TEMP_PASSWORD_ALPHABET = string.ascii_letters + string.digits
 TEMP_PASSWORD_LENGTH = 12
 
 
+# BLOCK-START: ADMIN_HELPERS
+# Description: Shared helper functions for admin response shaping and mutation guards.
 def build_admin_user_out(user: User, tasks_count: int) -> AdminUserOut:
     return AdminUserOut(
         id=user.id,
@@ -68,8 +72,11 @@ def ensure_admin_target_allowed(current_admin: User, user: User) -> None:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot modify another admin account",
         )
+# BLOCK-END: ADMIN_HELPERS
 
 
+# BLOCK-START: ADMIN_USER_LIST_ENDPOINT
+# Description: Lists users with pagination and optional search for the admin UI.
 @router.get("/users", response_model=Response[AdminUsersPageOut])
 async def list_users(
     page: int = Query(default=1, ge=1),
@@ -78,6 +85,17 @@ async def list_users(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_admin),
 ) -> Response[AdminUsersPageOut]:
+    """
+    function_contracts:
+      list_users:
+        description: "Returns paginated admin-facing user list with optional email search."
+        preconditions:
+          - "Authenticated requester is an admin"
+          - "page >= 1 and 1 <= per_page <= 100"
+        postconditions:
+          - "Returns AdminUsersPageOut with items, total, page, and per_page"
+          - "Filters by case-insensitive email search when provided"
+    """
     normalized_search = search.strip() if search else None
     task_counts = (
         select(Task.user_id.label("user_id"), func.count(Task.id).label("tasks_count"))
@@ -109,8 +127,11 @@ async def list_users(
             per_page=per_page,
         ),
     )
+# BLOCK-END: ADMIN_USER_LIST_ENDPOINT
 
 
+# BLOCK-START: ADMIN_USER_STATUS_ENDPOINT
+# Description: Changes active status for a non-admin target user.
 @router.patch("/users/{user_id}/block", response_model=Response[AdminUserOut])
 async def set_user_active(
     user_id: str,
@@ -118,6 +139,19 @@ async def set_user_active(
     db: AsyncSession = Depends(get_db),
     current_admin: User = Depends(require_admin),
 ) -> Response[AdminUserOut]:
+    """
+    function_contracts:
+      set_user_active:
+        description: "Updates active status for a target user while preventing self-edit and admin-to-admin mutation."
+        preconditions:
+          - "Authenticated requester is an admin"
+          - "Target user exists and is not the current admin"
+        postconditions:
+          - "Persists new active status"
+          - "Returns refreshed AdminUserOut"
+          - "400 for forbidden self/admin mutations"
+          - "404 when target user does not exist"
+    """
     user = await get_admin_target_user(db, user_id)
 
     if user.id == current_admin.id:
@@ -138,8 +172,11 @@ async def set_user_active(
     await db.refresh(user)
 
     return Response(data=build_admin_user_out(user, await get_user_tasks_count(db, user.id)))
+# BLOCK-END: ADMIN_USER_STATUS_ENDPOINT
 
 
+# BLOCK-START: ADMIN_USER_EMAIL_ENDPOINT
+# Description: Changes a target user's email address with uniqueness enforcement.
 @router.patch("/users/{user_id}/email", response_model=Response[AdminUserOut])
 async def set_user_email(
     user_id: str,
@@ -147,6 +184,18 @@ async def set_user_email(
     db: AsyncSession = Depends(get_db),
     current_admin: User = Depends(require_admin),
 ) -> Response[AdminUserOut]:
+    """
+    function_contracts:
+      set_user_email:
+        description: "Normalizes and updates a target user's email when it is unique."
+        preconditions:
+          - "Authenticated requester is an admin"
+          - "Target user exists and passes admin mutation guard"
+        postconditions:
+          - "Email is stored lower-cased and trimmed"
+          - "Returns refreshed AdminUserOut"
+          - "400 when email is already in use"
+    """
     user = await get_admin_target_user(db, user_id)
     ensure_admin_target_allowed(current_admin, user)
 
@@ -161,14 +210,29 @@ async def set_user_email(
     await db.refresh(user)
 
     return Response(data=build_admin_user_out(user, await get_user_tasks_count(db, user.id)))
+# BLOCK-END: ADMIN_USER_EMAIL_ENDPOINT
 
 
+# BLOCK-START: ADMIN_PASSWORD_RESET_ENDPOINT
+# Description: Generates and applies a temporary password for a target user.
 @router.post("/users/{user_id}/reset-password", response_model=Response[ResetPasswordOut])
 async def reset_user_password(
     user_id: str,
     db: AsyncSession = Depends(get_db),
     current_admin: User = Depends(require_admin),
 ) -> Response[ResetPasswordOut]:
+    """
+    function_contracts:
+      reset_user_password:
+        description: "Resets target user password to a generated temporary credential."
+        preconditions:
+          - "Authenticated requester is an admin"
+          - "Target user exists and passes admin mutation guard"
+        postconditions:
+          - "Stored password hash is replaced"
+          - "Reset token fields are cleared"
+          - "Returns generated temporary password"
+    """
     user = await get_admin_target_user(db, user_id)
     ensure_admin_target_allowed(current_admin, user)
 
@@ -180,27 +244,53 @@ async def reset_user_password(
     await db.commit()
 
     return Response(data=ResetPasswordOut(temp_password=temp_password))
+# BLOCK-END: ADMIN_PASSWORD_RESET_ENDPOINT
 
 
+# BLOCK-START: ADMIN_IMPERSONATION_ENDPOINT
+# Description: Creates a short-lived impersonation code for a target user.
 @router.post("/users/{user_id}/impersonate", response_model=Response[ImpersonateOut])
 async def impersonate_user(
     user_id: str,
     db: AsyncSession = Depends(get_db),
     current_admin: User = Depends(require_admin),
 ) -> Response[ImpersonateOut]:
+    """
+    function_contracts:
+      impersonate_user:
+        description: "Creates a one-time impersonation code stored in Redis for the chosen user."
+        preconditions:
+          - "Authenticated requester is an admin"
+          - "Target user exists and passes admin mutation guard"
+        postconditions:
+          - "Returns ImpersonateOut with generated code"
+          - "Stores code in Redis with 120-second TTL"
+    """
     user = await get_admin_target_user(db, user_id)
     ensure_admin_target_allowed(current_admin, user)
 
     code = str(uuid4())
     await redis_client.set(IMPERSONATE_KEY.format(code=code), user.id, ex=120)
     return Response(data=ImpersonateOut(code=code))
+# BLOCK-END: ADMIN_IMPERSONATION_ENDPOINT
 
 
+# BLOCK-START: ADMIN_STATS_ENDPOINT
+# Description: Returns platform-level counts for users, recent activity, tasks, and habits.
 @router.get("/stats", response_model=Response[PlatformStatsOut])
 async def get_stats(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_admin),
 ) -> Response[PlatformStatsOut]:
+    """
+    function_contracts:
+      get_stats:
+        description: "Returns high-level platform statistics for admin dashboard widgets."
+        preconditions:
+          - "Authenticated requester is an admin"
+        postconditions:
+          - "Returns counts for total users, active_7d, total tasks, and total habits"
+    """
     seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
     total_users = int((await db.scalar(select(func.count()).select_from(User))) or 0)
     active_7d = int(
@@ -222,3 +312,5 @@ async def get_stats(
             total_habits=total_habits,
         ),
     )
+# BLOCK-END: ADMIN_STATS_ENDPOINT
+# BLOCK-END: ADMIN_API_MODULE
