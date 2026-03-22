@@ -22,10 +22,14 @@ from app.models.user import User
 from app.schemas.auth import AuthResponseOut, AuthUserOut
 from app.services.habit_service import seed_default_habits_for_user
 
+# BLOCK-START: AUTH_SERVICE_MODULE
+# Description: Auth domain service for browser-cookie sessions, password recovery, and seed users.
 REFRESH_KEY = "refresh:{user_id}:{jti}"
 logger = logging.getLogger(__name__)
 
 
+# BLOCK-START: AUTH_SERVICE_HELPERS
+# Description: Shared lookup and refresh-token helper functions used by auth flows.
 async def get_user_by_email(db: AsyncSession, email: str) -> User | None:
     normalized_email = email.strip().lower()
     result = await db.execute(select(User).where(User.email == normalized_email))
@@ -51,15 +55,21 @@ def build_auth_response(user: User, access_token: str, refresh_token: str) -> Au
         refresh_token=refresh_token,
         user=AuthUserOut.model_validate(user),
     )
+# BLOCK-END: AUTH_SERVICE_HELPERS
 
 
+# BLOCK-START: AUTH_TOKEN_ISSUANCE
+# Description: Issues access/refresh tokens and persists refresh token state in Redis.
 async def issue_auth_tokens(user: User) -> AuthResponseOut:
     access_token = create_access_token(user.id)
     refresh_token, jti = create_refresh_token(user.id)
     await store_refresh_token(user.id, jti)
     return build_auth_response(user, access_token, refresh_token)
+# BLOCK-END: AUTH_TOKEN_ISSUANCE
 
 
+# BLOCK-START: AUTH_REGISTER_LOGIN_FLOW
+# Description: Registration and credential-based login flows with LDD logging.
 async def register_user(db: AsyncSession, email: str, password: str) -> AuthResponseOut:
     normalized_email = email.strip().lower()
     logger.info("[AUTH][REGISTER][ATTEMPT] email=%s", normalized_email)
@@ -98,8 +108,11 @@ async def login_user(db: AsyncSession, email: str, password: str) -> AuthRespons
     await db.refresh(user)
     logger.info("[AUTH][LOGIN][SUCCESS] user_id=%s", user.id)
     return await issue_auth_tokens(user)
+# BLOCK-END: AUTH_REGISTER_LOGIN_FLOW
 
 
+# BLOCK-START: AUTH_SESSION_FLOW
+# Description: Refresh and logout flows backed by refresh token state in Redis.
 async def refresh_session(db: AsyncSession, refresh_token: str) -> AuthResponseOut:
     try:
         payload = decode_token(refresh_token)
@@ -141,8 +154,11 @@ async def logout_user(refresh_token: str) -> None:
     jti = str(payload.get("jti", ""))
     if user_id and jti:
         await revoke_refresh_token(user_id, jti)
+# BLOCK-END: AUTH_SESSION_FLOW
 
 
+# BLOCK-START: AUTH_PASSWORD_ACCOUNT_FLOW
+# Description: Password reset, password change, and account deletion flows.
 async def forgot_password(db: AsyncSession, email: str) -> None:
     user = await get_user_by_email(db, email)
     if user is None:
@@ -198,8 +214,11 @@ async def delete_account(db: AsyncSession, user: User, password: str) -> None:
 
     await db.delete(user)
     await db.commit()
+# BLOCK-END: AUTH_PASSWORD_ACCOUNT_FLOW
 
 
+# BLOCK-START: AUTH_SEED_USERS_FLOW
+# Description: Seed-user helpers for demo/admin bootstrap in dev and test scenarios.
 async def _ensure_seed_user(
     db: AsyncSession,
     *,
@@ -239,3 +258,5 @@ async def ensure_seed_users(db: AsyncSession) -> None:
         )
 
     await db.commit()
+# BLOCK-END: AUTH_SEED_USERS_FLOW
+# BLOCK-END: AUTH_SERVICE_MODULE
