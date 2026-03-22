@@ -68,5 +68,7 @@ class TestJwtTokens:
 
     def test_tampered_token_is_invalid(self):
         token = create_access_token("user-1")
-        tampered = f"{token[:-1]}{'A' if token[-1] != 'A' else 'B'}"
+        header, payload, signature = token.split(".")
+        tampered_payload = f"{'A' if payload[0] != 'A' else 'B'}{payload[1:]}"
+        tampered = ".".join([header, tampered_payload, signature])
         assert safely_decode_token(tampered) is None

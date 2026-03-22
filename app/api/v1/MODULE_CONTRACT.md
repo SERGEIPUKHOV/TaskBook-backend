@@ -20,7 +20,12 @@ HTTP слой TaskBook API.
 | Файл | Роль |
 |---|---|
 | `__init__.py` | Сборка `api_router` и регистрация всех route groups |
-| `auth.py` | Регистрация, логин, refresh, logout, password flows |
+| `auth/__init__.py` | Единый auth router package и совместимый export auth deps |
+| `auth/deps.py` | Access token extraction и `get_current_user` / `get_optional_user` |
+| `auth/register.py` | Регистрация нового пользователя |
+| `auth/sessions.py` | Логин, refresh, logout и exchange-impersonate |
+| `auth/password.py` | Forgot/reset/change password и delete account |
+| `auth/MODULE_CONTRACT.md` | Контракт auth route package |
 | `users.py` | Профиль текущего пользователя |
 | `months.py` | Month plan, month states, month bundle |
 | `habits.py` | CRUD привычек и habit logs |
@@ -55,4 +60,4 @@ HTTP слой TaskBook API.
 
 ## Критичные точки изменения
 - Любое изменение URL, auth behaviour или response shape потенциально ломает frontend и admin.
-- Изменения в `auth.py` и `admin/` требуют повышенной осторожности из-за безопасности и прав доступа.
+- Изменения в `auth/` и `admin/` требуют повышенной осторожности из-за безопасности и прав доступа.
