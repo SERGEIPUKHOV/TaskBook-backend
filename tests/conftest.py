@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,7 @@ from httpx import ASGITransport, AsyncClient
 
 from tests.helpers import extract_data
 
-TEST_DB_PATH = Path(__file__).resolve().parent / "test.db"
+TEST_DB_PATH = Path(tempfile.gettempdir()) / f"taskbook-pytest-{os.getpid()}.db"
 
 os.environ["APP_ENV"] = "test"
 os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{TEST_DB_PATH}"
@@ -24,12 +25,28 @@ from app.core.database import engine
 from app.models.base import Base
 
 
+@pytest.fixture(scope="session")
+def anyio_backend():
+    return "asyncio"
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def reset_db():
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.drop_all)
         await connection.run_sync(Base.metadata.create_all)
     yield
+
+
+@pytest.fixture(scope="session", autouse=True)
+def cleanup_test_db():
+    if TEST_DB_PATH.exists():
+        TEST_DB_PATH.unlink()
+
+    yield
+
+    if TEST_DB_PATH.exists():
+        TEST_DB_PATH.unlink()
 
 
 @pytest_asyncio.fixture

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from datetime import date
+
 from tests.helpers import extract_data
 
 
 async def test_dashboard_and_user_isolation(client):
+    current_year, current_week, _ = date.today().isocalendar()
     first_user = await client.post(
         "/api/v1/auth/register",
         json={"email": "alpha@example.com", "password": "password123"},
@@ -17,7 +20,7 @@ async def test_dashboard_and_user_isolation(client):
     second_headers = {"Authorization": f"Bearer {extract_data(second_user)['access_token']}"}
 
     created_task = await client.post(
-        "/api/v1/weeks/2026/11/tasks",
+        f"/api/v1/weeks/{current_year}/{current_week}/tasks",
         json={"title": "Private task", "start_day": 1},
         headers=first_headers,
     )
