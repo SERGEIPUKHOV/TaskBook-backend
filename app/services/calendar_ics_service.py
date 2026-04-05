@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timedelta
 from hashlib import sha256
 from typing import Any
@@ -19,6 +20,8 @@ from app.services.calendar_sync_service import (
     mark_connection_error,
     reconcile_connection_events,
 )
+
+logger = logging.getLogger(__name__)
 
 
 async def fetch_ics_feed(ics_url: str) -> str:
@@ -163,3 +166,34 @@ async def sync_apple_connection(db: AsyncSession, connection: CalendarConnection
     except CalendarSyncError as error:
         await mark_connection_error(db, connection, str(error))
         raise
+
+
+async def sync_all_apple_connections(
+    db: AsyncSession,
+    *,
+    user_id: str | None = None,
+) -> list[CalendarConnection]:
+    query = (
+        select(CalendarConnection)
+        .where(CalendarConnection.provider == "apple")
+        .order_by(CalendarConnection.account_label.asc(), CalendarConnection.created_at.asc())
+    )
+    if user_id is not None:
+        query = query.where(CalendarConnection.user_id == user_id)
+
+    result = await db.execute(query)
+    connections = result.scalars().all()
+    synced: list[CalendarConnection] = []
+    for connection in connections:
+        try:
+            synced.append(await sync_apple_connection(db, connection))
+        except CalendarSyncError:
+            await db.refresh(connection)
+            logger.warning(
+                "calendar_apple_connection_sync_failed",
+                extra={
+                    "connection_id": str(connection.id),
+                    "user_id": str(connection.user_id),
+                },
+            )
+    return synced
