@@ -7,7 +7,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.habit import Habit, HabitLog
-from app.schemas.habit import HabitGridOut, HabitOut
+from app.schemas.habit import HabitGridOut, HabitOut, HabitPatch, normalize_schedule_days
 from app.services.cache_service import invalidate_dashboard
 from app.services.periods import days_in_month, month_key, validate_month
 
@@ -100,7 +100,15 @@ async def get_month_habit_grid(db: AsyncSession, user_id: str, year: int, month:
     )
 
 
-async def create_habit(db: AsyncSession, user_id: str, year: int, month: int, name: str) -> HabitOut:
+async def create_habit(
+    db: AsyncSession,
+    user_id: str,
+    year: int,
+    month: int,
+    name: str,
+    *,
+    schedule_days: list[int] | None = None,
+) -> HabitOut:
     target_month_key = _validated_month_key(year, month)
     active_habits_result = await db.execute(await _active_habit_query(user_id, target_month_key))
     active_habits = active_habits_result.scalars().all()
@@ -119,6 +127,7 @@ async def create_habit(db: AsyncSession, user_id: str, year: int, month: int, na
         source="user",
         starts_at_month_key=target_month_key,
         ends_before_month_key=None,
+        schedule_days=normalize_schedule_days(schedule_days),
     )
     db.add(record)
     await db.commit()
@@ -135,19 +144,29 @@ async def get_habit_for_user(db: AsyncSession, user_id: str, habit_id: str) -> H
     return habit
 
 
-async def update_habit(db: AsyncSession, user_id: str, habit_id: str, name: str) -> HabitOut:
+async def update_habit(db: AsyncSession, user_id: str, habit_id: str, patch: HabitPatch) -> HabitOut:
     habit = await get_habit_for_user(db, user_id, habit_id)
-    normalized_name = _normalize_habit_name(name)
-    normalized = normalized_name.lower()
-    active_habits_result = await db.execute(
-        await _active_habit_query(user_id, habit.starts_at_month_key or month_key(habit.created_at.year, habit.created_at.month)),
-    )
-    active_habits = active_habits_result.scalars().all()
+    fields_set = set(patch.model_fields_set)
 
-    if any(item.id != habit.id and item.name.strip().lower() == normalized for item in active_habits):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Habit already exists")
+    if "name" in fields_set:
+        normalized_name = _normalize_habit_name(patch.name or "")
+        normalized = normalized_name.lower()
+        active_habits_result = await db.execute(
+            await _active_habit_query(
+                user_id,
+                habit.starts_at_month_key or month_key(habit.created_at.year, habit.created_at.month),
+            ),
+        )
+        active_habits = active_habits_result.scalars().all()
 
-    habit.name = normalized_name
+        if any(item.id != habit.id and item.name.strip().lower() == normalized for item in active_habits):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Habit already exists")
+
+        habit.name = normalized_name
+
+    if "schedule_days" in fields_set:
+        habit.schedule_days = normalize_schedule_days(patch.schedule_days)
+
     db.add(habit)
     await db.commit()
     await db.refresh(habit)

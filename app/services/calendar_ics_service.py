@@ -23,6 +23,20 @@ from app.services.calendar_sync_service import (
 
 logger = logging.getLogger(__name__)
 
+_CALENDAR_PALETTE = [
+    "#D50000",
+    "#E67C73",
+    "#F4511E",
+    "#F6BF26",
+    "#33B679",
+    "#0B8043",
+    "#039BE5",
+    "#3F51B5",
+    "#7986CB",
+    "#8E24AA",
+    "#616161",
+]
+
 
 async def fetch_ics_feed(ics_url: str) -> str:
     url = ics_url.replace("webcal://", "https://", 1) if ics_url.startswith("webcal://") else ics_url
@@ -37,6 +51,13 @@ async def fetch_ics_feed(ics_url: str) -> str:
 
 def build_ics_external_account_id(ics_url: str) -> str:
     return sha256(ics_url.strip().encode("utf-8")).hexdigest()
+
+
+def _palette_color_for(external_account_id: str) -> str:
+    hash_value = 0
+    for character in external_account_id:
+        hash_value = (hash_value * 31 + ord(character)) & 0xFFFFFFFF
+    return _CALENDAR_PALETTE[hash_value % len(_CALENDAR_PALETTE)]
 
 
 def _to_text(value: Any) -> str | None:
@@ -98,6 +119,7 @@ def parse_ics_events(payload: str) -> tuple[str | None, list[NormalizedCalendarE
                 is_all_day=is_all_day,
                 status="cancelled" if status_raw == "cancelled" else "confirmed",
                 raw_payload={
+                    "rrule": bool(component.get("RRULE")),
                     "summary": _to_text(component.get("SUMMARY")),
                     "uid": uid,
                 },
@@ -131,6 +153,7 @@ async def get_or_create_apple_connection(
             external_account_id=external_account_id,
             account_label=account_label or "Apple Calendar",
             ics_url_encrypted=encrypt_secret(ics_url),
+            color=_palette_color_for(external_account_id),
         )
         db.add(connection)
         await db.flush()
@@ -150,6 +173,8 @@ async def sync_apple_connection(db: AsyncSession, connection: CalendarConnection
         raise CalendarSyncError("Отсутствует ICS URL для Apple Calendar")
 
     try:
+        if connection.color is None:
+            connection.color = _palette_color_for(connection.external_account_id)
         payload = await fetch_ics_feed(ics_url)
         feed_label, events = parse_ics_events(payload)
         if feed_label and not connection.account_label:

@@ -2,13 +2,14 @@
 
 ## Назначение
 Предметная логика TaskBook.
-Слой orchestrates операции с моделями, валидацию периода, агрегации bundle и auth/session сценарии.
+Слой orchestrates операции с моделями, валидацию периода, агрегации bundle, auth/session сценарии и calendar integration flows.
 
 ## Ответственность
 - Выполнять user-scoped CRUD и domain операции поверх `AsyncSession`.
 - Собирать week/month/day bundles из нескольких сущностей.
 - Инкапсулировать auth logic: регистрация, логин, refresh, logout, reset password, seed users.
 - Централизовать расчёты периода и ISO week helpers.
+- Синхронизировать внешние календарные события, управлять импортом события в planner через backend-owned link layer и публиковать opt-in задачи в ICS feeds.
 
 ## Граница (что НЕ делает этот модуль)
 - Не объявляет HTTP routes и не работает с FastAPI `Request`/`Response`.
@@ -31,6 +32,12 @@
 | `dashboard_service.py` | Dashboard summary |
 | `periods.py` | Month/week key helpers и validators |
 | `cache_service.py` | Cache key helpers |
+| `calendar_service.py` | Calendar connections, event range read, import orchestration facade |
+| `calendar_bridge_service.py` | Calendar -> planner import rules, link resolution и idempotency |
+| `calendar_task_export_service.py` | Tokenized task-feed links и ICS export по buckets |
+| `calendar_sync_service.py` | Normalized event upsert/sync helpers |
+| `calendar_google_service.py` | Google Calendar OAuth/token and provider sync logic |
+| `calendar_ics_service.py` | Apple ICS fetch/parse/sync logic |
 | `__init__.py` | Текущий re-export `ensure_seed_users` |
 
 ## Зависимости
@@ -40,6 +47,7 @@
 - `app.core.security`
 - `app.core.redis`
 - `app.services.periods`
+- внешние calendar providers через adapter-style service helpers (`google`, `ics`)
 
 ## Инварианты
 - Все функции, затрагивающие БД или Redis, должны работать в async стиле.
@@ -47,6 +55,7 @@
 - User-facing данные должны быть отфильтрованы по пользователю; кросс-пользовательский доступ допустим только в явно admin/auth сценариях.
 - `periods.py` остаётся источником правил по месяцу, дню и ISO week validation.
 - Bundle services собирают данные из более узких сервисов, а не наоборот.
+- Calendar import idempotency и task feed token provisioning принадлежат backend service layer, а не frontend state.
 
 ## Экспортируемый интерфейс
 - Основной публичный API модуля - набор функций по файлам.

@@ -9,6 +9,7 @@ Typed request/response contracts для backend API.
 - Описывать response schemas для frontend/admin клиентов.
 - Держать shared envelope и pagination contracts в `common.py`.
 - Отражать backend domain model в transport-safe виде без протаскивания ORM объектов наружу.
+- Описывать calendar integration payloads, event read-models, import contracts и task-feed link contracts.
 
 ## Граница (что НЕ делает этот модуль)
 - Не обращается к БД и не знает про `AsyncSession`.
@@ -23,13 +24,14 @@ Typed request/response contracts для backend API.
 | `admin.py` | Admin user/stats contracts |
 | `dashboard.py` | Dashboard summary schemas |
 | `user.py` | Профиль и user-facing contracts |
-| `task.py` | Task CRUD и task day status contracts |
+| `task.py` | Task CRUD, export flags/bucket и task day status contracts |
 | `habit.py` | Habit CRUD и habit grid/log contracts |
 | `week.py` | Week summary, patch и bundle contracts |
 | `month.py` | Month plan и month state contracts |
 | `day.py` | Day bundle contracts |
 | `day_entry.py` | Key events и gratitude entries |
 | `daily_state.py` | Метрики состояния по дням |
+| `calendar.py` | Calendar connections, events, import, planner-link и task-feed contracts |
 | `common.py` | `Response`, `PaginatedResponse`, `OperationStatus` |
 | `__init__.py` | Package exports |
 

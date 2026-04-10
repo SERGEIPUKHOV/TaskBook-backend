@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from typing import Literal
+from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.task import TaskCalendarExportBucket
+
+ScheduleDay = Annotated[int, Field(ge=1, le=7)]
 
 
 class GoogleAuthSessionIn(BaseModel):
@@ -64,6 +66,7 @@ class CalendarConnectionOut(BaseModel):
 class CalendarEventOut(BaseModel):
     planner_link: "PlannerLinkOut | None" = None
     suggested_target_type: Literal["task", "habit"]
+    recurrence: list[str] = Field(default_factory=list)
     id: str
     connection_id: str
     provider: str
@@ -92,6 +95,7 @@ class PlannerLinkOut(BaseModel):
 class CalendarEventImportIn(BaseModel):
     is_priority: bool = False
     month: int | None = Field(default=None, ge=1, le=12)
+    schedule_days: list[ScheduleDay] | None = None
     start_day: int | None = Field(default=None, ge=1, le=7)
     target_type: Literal["task", "habit"]
     time_planned: int | None = Field(default=None, ge=0, le=999)

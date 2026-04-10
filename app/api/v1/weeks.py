@@ -67,6 +67,8 @@ async def add_task(
             time_actual=data.time_actual,
             is_priority=data.is_priority,
             start_day=data.start_day,
+            calendar_export_enabled=data.calendar_export_enabled,
+            calendar_export_bucket=data.calendar_export_bucket,
         ),
     )
 

@@ -50,6 +50,25 @@ async def test_habit_crud_grid_logs_and_ownership(client):
     assert rename_response.status_code == 200
     renamed_habit = extract_data(rename_response)
     assert renamed_habit["name"] == "Evening walk"
+    assert renamed_habit["schedule_days"] == []
+
+    schedule_response = await client.patch(
+        f"/api/v1/habits/{first_habit['id']}",
+        json={"schedule_days": [5, 1, 3, 3]},
+        headers=owner_headers,
+    )
+    assert schedule_response.status_code == 200
+    scheduled_habit = extract_data(schedule_response)
+    assert scheduled_habit["schedule_days"] == [1, 3, 5]
+
+    reset_schedule_response = await client.patch(
+        f"/api/v1/habits/{first_habit['id']}",
+        json={"schedule_days": []},
+        headers=owner_headers,
+    )
+    assert reset_schedule_response.status_code == 200
+    reset_scheduled_habit = extract_data(reset_schedule_response)
+    assert reset_scheduled_habit["schedule_days"] == []
 
     duplicate_rename_response = await client.patch(
         f"/api/v1/habits/{first_habit['id']}",

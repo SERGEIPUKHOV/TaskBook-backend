@@ -8,7 +8,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     APP_ENV: str = "development"
-    APP_VERSION: str = "6.1.1"
+    APP_VERSION: str = "9.0.0"
     API_V1_PREFIX: str = "/api/v1"
     SECRET_KEY: str = "change_me_in_production"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     AUTH_COOKIE_DOMAIN: str | None = None
     AUTH_COOKIE_SAMESITE: str = "lax"
     AUTH_COOKIE_SECURE: bool = False
+    GOOGLE_CALENDAR_CLIENT_ID: str | None = None
+    GOOGLE_CALENDAR_CLIENT_SECRET: str | None = None
+    GOOGLE_CALENDAR_REDIRECT_URI: str | None = None
+    CALENDAR_SECRETS_KEY: str = "taskbook-calendar-dev-secret"
+    CALENDAR_SYNC_INTERVAL_SECONDS: int = 300
+    CALENDAR_SYNC_LOCK_TTL_SECONDS: int = 540
     CORS_ORIGINS: str = Field(
         default="http://localhost:3000,http://localhost:3001,http://localhost:3002,http://localhost:3003",
     )

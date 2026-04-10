@@ -33,6 +33,7 @@ HTTP слой TaskBook API.
 | `tasks.py` | Patch/delete task и day statuses |
 | `days.py` | Day bundle, key events, gratitudes |
 | `dashboard.py` | Dashboard summary |
+| `calendar.py` | Calendar connections, sync, event range read, import в planner и task ICS feed endpoints |
 | `admin/__init__.py` | Единый admin router package и сборка subrouters |
 | `admin/users.py` | Admin users actions, password reset, impersonation |
 | `admin/stats.py` | Platform stats для admin dashboard |
@@ -54,6 +55,7 @@ HTTP слой TaskBook API.
 - Защищённые endpoints работают через `get_current_user`, а admin endpoints через `require_admin`.
 - Не-`204` ответы должны оставаться совместимыми со schema contract; `204` не возвращает body.
 - Route handlers делегируют предметную работу в service layer, а не дублируют её локально.
+- Public `.ics` feeds остаются минимальным publish-surface без write-back логики во внешние календари.
 
 ## Экспортируемый интерфейс
 - `api_router` - единая точка подключения API v1 в `app.main`

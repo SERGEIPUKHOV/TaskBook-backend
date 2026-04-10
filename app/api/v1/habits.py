@@ -70,7 +70,7 @@ async def add_habit(
 
 
 @router.patch("/habits/{habit_id}", response_model=Response[HabitOut])
-async def rename_habit(
+async def patch_habit(
     habit_id: str,
     data: HabitPatch,
     current_user: User = Depends(get_current_user),
@@ -78,16 +78,16 @@ async def rename_habit(
 ) -> Response[HabitOut]:
     """
     function_contracts:
-      rename_habit:
-        description: "Renames one existing habit owned by the current user."
+      patch_habit:
+        description: "Updates one existing habit owned by the current user."
         preconditions:
           - "habit_id identifies an existing user-owned habit"
-          - "data.name contains validated replacement habit name"
+          - "data contains one or more validated habit fields"
         postconditions:
           - "Returns the updated HabitOut"
           - "404 when the habit is missing"
     """
-    return Response(data=await update_habit(db, current_user.id, habit_id, data.name))
+    return Response(data=await update_habit(db, current_user.id, habit_id, data))
 
 
 @router.delete("/habits/{habit_id}", status_code=status.HTTP_204_NO_CONTENT)

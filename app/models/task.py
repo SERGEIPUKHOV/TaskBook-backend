@@ -19,6 +19,8 @@ class Task(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     is_priority: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     start_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    calendar_export_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    calendar_export_bucket: Mapped[str | None] = mapped_column(String(32), nullable=True)
     carried_from_task_id: Mapped[str | None] = mapped_column(
         ForeignKey("tasks.id", ondelete="SET NULL"),
         nullable=True,

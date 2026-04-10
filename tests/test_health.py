@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.core.config import settings
+
 
 async def test_health_reports_db_redis_and_version(client):
     response = await client.get("/health")
@@ -9,6 +11,6 @@ async def test_health_reports_db_redis_and_version(client):
         "status": "ok",
         "db": "ok",
         "redis": "ok",
-        "version": "6.1.1",
+        "version": settings.APP_VERSION,
         "environment": "test",
     }

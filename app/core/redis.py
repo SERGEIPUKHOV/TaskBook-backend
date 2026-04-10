@@ -27,8 +27,11 @@ class InMemoryRedis:
             return None
         return entry[0]
 
-    async def set(self, key: str, value: str, ex: int | None = None) -> bool:
+    async def set(self, key: str, value: str, ex: int | None = None, nx: bool = False) -> bool:
         expires_at = time.time() + ex if ex else None
+        self._purge(key)
+        if nx and key in self._data:
+            return False
         self._data[key] = (value, expires_at)
         return True
 

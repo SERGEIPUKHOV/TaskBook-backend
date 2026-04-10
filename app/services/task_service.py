@@ -23,6 +23,8 @@ def _serialize_task(task: Task, statuses: dict[str, str]) -> TaskOut:
         is_priority=task.is_priority,
         order=task.order,
         start_day=task.start_day,
+        calendar_export_enabled=task.calendar_export_enabled,
+        calendar_export_bucket=task.calendar_export_bucket,
         carried_from_task_id=task.carried_from_task_id,
         statuses=statuses,
     )
@@ -64,6 +66,8 @@ async def create_task(
     time_actual: int | None = None,
     is_priority: bool = False,
     start_day: int | None = 1,
+    calendar_export_enabled: bool = False,
+    calendar_export_bucket: str | None = None,
 ) -> TaskOut:
     week = await get_or_create_week(db, user_id, year, week_number)
     tasks_result = await db.execute(
@@ -80,6 +84,8 @@ async def create_task(
         is_priority=is_priority,
         order=next_order,
         start_day=start_day or 1,
+        calendar_export_enabled=calendar_export_enabled,
+        calendar_export_bucket=calendar_export_bucket,
         carried_from_task_id=None,
     )
     db.add(task)

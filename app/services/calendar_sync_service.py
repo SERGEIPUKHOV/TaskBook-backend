@@ -186,6 +186,10 @@ async def list_connection_events_in_range(
         CalendarEventOut(
             planner_link=planner_links.get(build_calendar_event_source_ref(event.connection_id, event.external_event_id)),
             suggested_target_type=get_calendar_event_suggested_target_type(event),
+            recurrence=[
+                item for item in ((event.raw_payload or {}).get("recurrence") or [])
+                if isinstance(item, str)
+            ],
             id=event.id,
             connection_id=event.connection_id,
             provider=connection.provider,
