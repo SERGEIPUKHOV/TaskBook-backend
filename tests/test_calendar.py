@@ -616,6 +616,92 @@ async def test_calendar_events_mark_future_instances_of_linked_recurring_series(
     assert one_off_event["series_linked"] is False
 
 
+async def test_calendar_event_unlocks_after_imported_task_is_deleted(client):
+    email = "calendar-deleted-task@example.com"
+    headers, _ = await register_and_auth(client, email)
+    event_id = await seed_manual_calendar_event(
+        email,
+        title="Design Review",
+        external_event_id="task-delete-1",
+        starts_at=datetime(2026, 3, 10, 9, 0, tzinfo=timezone.utc),
+        ends_at=datetime(2026, 3, 10, 10, 0, tzinfo=timezone.utc),
+    )
+
+    import_response = await client.post(
+        f"/api/v1/calendar/events/{event_id}/import",
+        json={
+            "target_type": "task",
+            "title": "Design Review",
+            "year": 2026,
+            "week": 11,
+            "start_day": 2,
+            "time_planned": 2,
+            "is_priority": False,
+        },
+        headers=headers,
+    )
+    assert import_response.status_code == 200
+    task_id = extract_data(import_response)["planner_link"]["target_id"]
+
+    delete_response = await client.delete(f"/api/v1/tasks/{task_id}", headers=headers)
+    assert delete_response.status_code == 204
+
+    events_response = await client.get(
+        "/api/v1/calendar/events?date_from=2026-03-09&date_to=2026-03-15",
+        headers=headers,
+    )
+    assert events_response.status_code == 200
+    event = next(item for item in extract_data(events_response)["events"] if item["id"] == event_id)
+    assert event["planner_link"] is None
+    assert event["series_linked"] is False
+
+
+async def test_calendar_recurring_series_unlocks_after_imported_habit_is_deleted(client):
+    email = "calendar-deleted-habit@example.com"
+    headers, _ = await register_and_auth(client, email)
+    first_event_id = await seed_manual_calendar_event(
+        email,
+        title="Weekly Piano",
+        external_event_id="habit-delete-1",
+        raw_payload={"recurringEventId": "series-delete-1"},
+        starts_at=datetime(2026, 3, 12, 18, 0, tzinfo=timezone.utc),
+        ends_at=datetime(2026, 3, 12, 19, 0, tzinfo=timezone.utc),
+    )
+    future_event_id = await seed_manual_calendar_event(
+        email,
+        title="Weekly Piano",
+        external_event_id="habit-delete-2",
+        raw_payload={"recurringEventId": "series-delete-1"},
+        starts_at=datetime(2026, 3, 19, 18, 0, tzinfo=timezone.utc),
+        ends_at=datetime(2026, 3, 19, 19, 0, tzinfo=timezone.utc),
+    )
+
+    import_response = await client.post(
+        f"/api/v1/calendar/events/{first_event_id}/import",
+        json={
+            "target_type": "habit",
+            "title": "Weekly Piano",
+            "year": 2026,
+            "month": 3,
+        },
+        headers=headers,
+    )
+    assert import_response.status_code == 200
+    habit_id = extract_data(import_response)["planner_link"]["target_id"]
+
+    delete_response = await client.delete(f"/api/v1/habits/{habit_id}?year=2026&month=3", headers=headers)
+    assert delete_response.status_code == 204
+
+    events_response = await client.get(
+        "/api/v1/calendar/events?date_from=2026-03-16&date_to=2026-03-22",
+        headers=headers,
+    )
+    assert events_response.status_code == 200
+    future_event = next(item for item in extract_data(events_response)["events"] if item["id"] == future_event_id)
+    assert future_event["planner_link"] is None
+    assert future_event["series_linked"] is False
+
+
 async def test_import_habit_name_conflict_with_calendar_source(client):
     email = "calendar-import-habit-conflict-source@example.com"
     headers, _ = await register_and_auth(client, email)

@@ -3,9 +3,10 @@ from __future__ import annotations
 from datetime import date
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.planner_link import PlannerLink
 from app.models.task import Task, TaskDayStatus
 from app.models.week import Week
 from app.schemas.task import ReorderIn, TaskDayStatusOut, TaskOut, TaskPatch
@@ -118,6 +119,13 @@ async def update_task(db: AsyncSession, user_id: str, task_id: str, patch: TaskP
 
 async def delete_task(db: AsyncSession, user_id: str, task_id: str) -> None:
     task = await get_task_for_user(db, user_id, task_id)
+    await db.execute(
+        delete(PlannerLink).where(
+            PlannerLink.user_id == user_id,
+            PlannerLink.target_kind == "task",
+            PlannerLink.target_id == task.id,
+        ),
+    )
     await db.delete(task)
     await db.commit()
     await invalidate_dashboard(user_id)

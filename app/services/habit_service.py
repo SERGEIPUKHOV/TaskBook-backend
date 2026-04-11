@@ -3,10 +3,11 @@ from __future__ import annotations
 from datetime import date
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.habit import Habit, HabitLog
+from app.models.planner_link import PlannerLink
 from app.schemas.habit import HabitGridOut, HabitOut, HabitPatch, normalize_schedule_days
 from app.services.cache_service import invalidate_dashboard
 from app.services.periods import days_in_month, month_key, validate_month
@@ -178,6 +179,13 @@ async def delete_habit_for_month(db: AsyncSession, user_id: str, habit_id: str, 
     habit = await get_habit_for_user(db, user_id, habit_id)
     habit.ends_before_month_key = _validated_month_key(year, month)
     db.add(habit)
+    await db.execute(
+        delete(PlannerLink).where(
+            PlannerLink.user_id == user_id,
+            PlannerLink.target_kind == "habit",
+            PlannerLink.target_id == habit.id,
+        ),
+    )
     await db.commit()
     await invalidate_dashboard(user_id)
 
