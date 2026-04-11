@@ -129,12 +129,32 @@ async def _fetch_google_calendar_item(access_token: str, calendar_id: str) -> di
     return await _google_get(access_token, f"/users/me/calendarList/{encoded_calendar_id}")
 
 
+async def _fetch_master_recurrences(
+    access_token: str,
+    calendar_id: str,
+    master_event_ids: set[str],
+) -> dict[str, list[str]]:
+    """Fetch recurrence rules from master recurring events (best-effort)."""
+    encoded_calendar_id = quote(calendar_id, safe="")
+    recurrences: dict[str, list[str]] = {}
+    for master_id in master_event_ids:
+        try:
+            encoded_event_id = quote(master_id, safe="")
+            data = await _google_get(access_token, f"/calendars/{encoded_calendar_id}/events/{encoded_event_id}")
+            rules = data.get("recurrence") or []
+            if rules:
+                recurrences[master_id] = rules
+        except CalendarSyncError:
+            pass  # best-effort — пропускаем если мастер недоступен
+    return recurrences
+
+
 async def _fetch_google_events(
     access_token: str,
     calendar_id: str,
     sync_cursor: str | None,
 ) -> tuple[list[NormalizedCalendarEvent], str | None, bool]:
-    events: list[NormalizedCalendarEvent] = []
+    raw_items: list[dict[str, Any]] = []
     next_page_token: str | None = None
     next_sync_token: str | None = None
     incremental = bool(sync_cursor)
@@ -162,12 +182,20 @@ async def _fetch_google_events(
             params["pageToken"] = next_page_token
 
         payload = await _google_get(access_token, f"/calendars/{encoded_calendar_id}/events", params=params)
-        events.extend(_map_google_event(item, calendar_id) for item in payload.get("items", []))
+        raw_items.extend(payload.get("items", []))
         next_page_token = payload.get("nextPageToken")
         if not next_page_token:
             next_sync_token = payload.get("nextSyncToken")
             break
 
+    # Для recurring-инстансов RRULE хранится только на мастер-событии —
+    # запрашиваем мастера батчем и инжектим recurrence в raw_payload
+    master_ids = {item["recurringEventId"] for item in raw_items if item.get("recurringEventId")}
+    master_recurrences: dict[str, list[str]] = {}
+    if master_ids:
+        master_recurrences = await _fetch_master_recurrences(access_token, calendar_id, master_ids)
+
+    events = [_map_google_event(item, calendar_id, master_recurrences) for item in raw_items]
     return events, next_sync_token, not incremental
 
 
@@ -190,8 +218,17 @@ def _parse_google_event_times(item: dict[str, Any]) -> tuple[datetime | None, da
     return None, None, None, False
 
 
-def _map_google_event(item: dict[str, Any], calendar_id: str) -> NormalizedCalendarEvent:
+def _map_google_event(
+    item: dict[str, Any],
+    calendar_id: str,
+    master_recurrences: dict[str, list[str]] | None = None,
+) -> NormalizedCalendarEvent:
     starts_at, ends_at, source_timezone, is_all_day = _parse_google_event_times(item)
+    # Инжектим recurrence из мастер-события в raw_payload инстанса
+    payload = item
+    master_id = item.get("recurringEventId")
+    if master_id and master_recurrences and master_id in master_recurrences:
+        payload = {**item, "recurrence": master_recurrences[master_id]}
     return NormalizedCalendarEvent(
         external_event_id=str(item.get("id") or ""),
         external_calendar_id=calendar_id,
@@ -203,7 +240,7 @@ def _map_google_event(item: dict[str, Any], calendar_id: str) -> NormalizedCalen
         source_timezone=source_timezone,
         is_all_day=is_all_day,
         status="cancelled" if item.get("status") == "cancelled" else "confirmed",
-        raw_payload=item,
+        raw_payload=payload,
     )
 
 
