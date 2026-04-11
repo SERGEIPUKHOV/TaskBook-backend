@@ -9,6 +9,8 @@ from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.models.calendar_connection import CalendarConnection
 from app.models.calendar_event import CalendarEvent
+from app.models.habit import Habit
+from app.models.planner_link import PlannerLink
 from app.models.user import User
 from app.services.calendar_ics_service import sync_all_apple_connections
 from app.services.calendar_google_service import store_google_tokens
@@ -700,6 +702,57 @@ async def test_calendar_recurring_series_unlocks_after_imported_habit_is_deleted
     future_event = next(item for item in extract_data(events_response)["events"] if item["id"] == future_event_id)
     assert future_event["planner_link"] is None
     assert future_event["series_linked"] is False
+
+
+async def test_calendar_ignores_stale_habit_links_for_inactive_months(client):
+    email = "calendar-stale-habit-link@example.com"
+    headers, _ = await register_and_auth(client, email)
+    event_id = await seed_manual_calendar_event(
+        email,
+        title="Тренировка",
+        external_event_id="stale-habit-1",
+        raw_payload={"recurringEventId": "series-stale-1"},
+        starts_at=datetime(2026, 4, 15, 11, 0, tzinfo=timezone.utc),
+        ends_at=datetime(2026, 4, 15, 13, 30, tzinfo=timezone.utc),
+    )
+
+    async with AsyncSessionLocal() as session:
+        user_result = await session.execute(select(User).where(User.email == email))
+        user = user_result.scalar_one()
+        event_result = await session.execute(select(CalendarEvent).where(CalendarEvent.id == event_id))
+        event = event_result.scalar_one()
+
+        habit = Habit(
+            user_id=user.id,
+            name="Тренировка",
+            order=1,
+            source="user",
+            starts_at_month_key="2026-03",
+            ends_before_month_key="2026-04",
+        )
+        session.add(habit)
+        await session.flush()
+
+        session.add(
+            PlannerLink(
+                user_id=user.id,
+                source_kind="calendar_event",
+                source_ref=f"{event.connection_id}:{event.external_event_id}",
+                target_kind="habit",
+                target_id=habit.id,
+                link_mode="import_copy",
+            ),
+        )
+        await session.commit()
+
+    events_response = await client.get(
+        "/api/v1/calendar/events?date_from=2026-04-13&date_to=2026-04-19",
+        headers=headers,
+    )
+    assert events_response.status_code == 200
+    event = next(item for item in extract_data(events_response)["events"] if item["id"] == event_id)
+    assert event["planner_link"] is None
+    assert event["series_linked"] is False
 
 
 async def test_import_habit_name_conflict_with_calendar_source(client):

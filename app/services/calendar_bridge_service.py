@@ -138,7 +138,13 @@ async def get_planner_link_by_source_ref(db: AsyncSession, user_id: str, source_
     return result.scalar_one_or_none()
 
 
-async def resolve_planner_link(db: AsyncSession, user_id: str, link: PlannerLink) -> PlannerLinkOut | None:
+async def resolve_planner_link(
+    db: AsyncSession,
+    user_id: str,
+    link: PlannerLink,
+    *,
+    as_of_date: date | None = None,
+) -> PlannerLinkOut | None:
     if link.target_kind == "task":
         result = await db.execute(
             select(Task, Week)
@@ -158,6 +164,12 @@ async def resolve_planner_link(db: AsyncSession, user_id: str, link: PlannerLink
         habit = result.scalar_one_or_none()
         if habit is None:
             return None
+        if as_of_date is not None:
+            target_month_key = month_key(as_of_date.year, as_of_date.month)
+            if habit.starts_at_month_key and habit.starts_at_month_key > target_month_key:
+                return None
+            if habit.ends_before_month_key and habit.ends_before_month_key <= target_month_key:
+                return None
         return planner_link_to_schema(
             link,
             open_path=month_key_to_open_path(habit.starts_at_month_key, habit.created_at.date()),
@@ -170,6 +182,8 @@ async def list_resolved_planner_links_for_source_refs(
     db: AsyncSession,
     user_id: str,
     source_refs: list[str],
+    *,
+    source_dates: dict[str, date] | None = None,
 ) -> dict[str, PlannerLinkOut]:
     if not source_refs:
         return {}
@@ -185,7 +199,12 @@ async def list_resolved_planner_links_for_source_refs(
     links = result.scalars().all()
     resolved: dict[str, PlannerLinkOut] = {}
     for link in links:
-        planner_link = await resolve_planner_link(db, user_id, link)
+        planner_link = await resolve_planner_link(
+            db,
+            user_id,
+            link,
+            as_of_date=source_dates.get(link.source_ref) if source_dates else None,
+        )
         if planner_link is not None:
             resolved[link.source_ref] = planner_link
     return resolved
@@ -214,7 +233,12 @@ async def import_calendar_event_to_planner(
     source_ref = build_calendar_event_source_ref(event.connection_id, event.external_event_id)
     existing_link = await get_planner_link_by_source_ref(db, user_id, source_ref)
     if existing_link is not None:
-        resolved_link = await resolve_planner_link(db, user_id, existing_link)
+        resolved_link = await resolve_planner_link(
+            db,
+            user_id,
+            existing_link,
+            as_of_date=event.starts_at.date(),
+        )
         if resolved_link is not None:
             return CalendarEventImportOut(status="existing", planner_link=resolved_link)
 

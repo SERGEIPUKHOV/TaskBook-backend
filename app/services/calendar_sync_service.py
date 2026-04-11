@@ -17,6 +17,7 @@ from app.services.calendar_bridge_service import (
     build_calendar_event_source_ref,
     get_calendar_event_suggested_target_type,
     list_resolved_planner_links_for_source_refs,
+    resolve_planner_link,
 )
 from app.schemas.calendar import CalendarConnectionOut, CalendarEventOut
 
@@ -183,25 +184,46 @@ async def list_connection_events_in_range(
         build_calendar_event_source_ref(event.connection_id, event.external_event_id)
         for event, _connection in rows
     ]
-    planner_links = await list_resolved_planner_links_for_source_refs(db, user_id, source_refs)
+    source_dates = {
+        build_calendar_event_source_ref(event.connection_id, event.external_event_id): event.starts_at.date()
+        for event, _connection in rows
+    }
+    planner_links = await list_resolved_planner_links_for_source_refs(
+        db,
+        user_id,
+        source_refs,
+        source_dates=source_dates,
+    )
     linked_recurring_ids: set[str] = set()
     linked_refs_result = await db.execute(
-        select(PlannerLink.source_ref).where(
+        select(PlannerLink).where(
             PlannerLink.user_id == user_id,
             PlannerLink.source_kind == CALENDAR_EVENT_SOURCE_KIND,
             PlannerLink.link_mode == IMPORT_COPY_LINK_MODE,
         ),
     )
-    linked_refs = set(linked_refs_result.scalars().all())
+    linked_links_by_ref = {
+        link.source_ref: link
+        for link in linked_refs_result.scalars().all()
+    }
 
-    if linked_refs:
+    if linked_links_by_ref:
         linked_events_result = await db.execute(select(CalendarEvent).where(CalendarEvent.user_id == user_id))
         for linked_event in linked_events_result.scalars().all():
             source_ref = build_calendar_event_source_ref(
                 linked_event.connection_id,
                 linked_event.external_event_id,
             )
-            if source_ref not in linked_refs:
+            linked_link = linked_links_by_ref.get(source_ref)
+            if linked_link is None:
+                continue
+            resolved_link = await resolve_planner_link(
+                db,
+                user_id,
+                linked_link,
+                as_of_date=linked_event.starts_at.date(),
+            )
+            if resolved_link is None:
                 continue
 
             recurring_id = (linked_event.raw_payload or {}).get("recurringEventId")
