@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.calendar_connection import CalendarConnection
 from app.models.calendar_provider_account import CalendarProviderAccount
 from app.models.calendar_event import CalendarEvent
+from app.models.habit import Habit
 from app.models.planner_link import PlannerLink
 from app.services.calendar_bridge_service import (
     CALENDAR_EVENT_SOURCE_KIND,
@@ -194,12 +195,15 @@ async def list_connection_events_in_range(
         source_refs,
         source_dates=source_dates,
     )
-    linked_recurring_ids: set[str] = set()
+    # recurring_id -> earliest starts_at_month_key of a linked habit ("YYYY-MM")
+    # Only habits contribute: task imports are per-instance and don't block other weeks.
+    linked_recurring_ids: dict[str, str] = {}
     linked_refs_result = await db.execute(
         select(PlannerLink).where(
             PlannerLink.user_id == user_id,
             PlannerLink.source_kind == CALENDAR_EVENT_SOURCE_KIND,
             PlannerLink.link_mode == IMPORT_COPY_LINK_MODE,
+            PlannerLink.target_kind == "habit",
         ),
     )
     linked_links_by_ref = {
@@ -208,6 +212,19 @@ async def list_connection_events_in_range(
     }
 
     if linked_links_by_ref:
+        # Pre-fetch starts_at_month_key for all linked habits in one query.
+        habit_target_ids = list({link.target_id for link in linked_links_by_ref.values()})
+        habits_result = await db.execute(
+            select(Habit.id, Habit.starts_at_month_key).where(
+                Habit.user_id == user_id,
+                Habit.id.in_(habit_target_ids),
+            ),
+        )
+        habit_starts: dict[str, str] = {
+            str(row.id): (row.starts_at_month_key or "")
+            for row in habits_result.all()
+        }
+
         linked_events_result = await db.execute(select(CalendarEvent).where(CalendarEvent.user_id == user_id))
         for linked_event in linked_events_result.scalars().all():
             source_ref = build_calendar_event_source_ref(
@@ -228,18 +245,31 @@ async def list_connection_events_in_range(
 
             recurring_id = (linked_event.raw_payload or {}).get("recurringEventId")
             if isinstance(recurring_id, str) and recurring_id:
-                linked_recurring_ids.add(recurring_id)
+                starts = habit_starts.get(str(linked_link.target_id), "")
+                # Keep the earliest start month if multiple habits link to the same series.
+                current = linked_recurring_ids.get(recurring_id, "9999-99")
+                if starts < current:
+                    linked_recurring_ids[recurring_id] = starts
 
     events_out: list[CalendarEventOut] = []
     for event, connection in rows:
         recurring_id_value = (event.raw_payload or {}).get("recurringEventId")
         recurring_id = recurring_id_value if isinstance(recurring_id_value, str) and recurring_id_value else None
+        event_month = (
+            f"{event.starts_at.year:04d}-{event.starts_at.month:02d}"
+            if event.starts_at else ""
+        )
+        habit_active_from = linked_recurring_ids.get(recurring_id, "9999-99") if recurring_id else "9999-99"
         events_out.append(
             CalendarEventOut(
                 planner_link=planner_links.get(
                     build_calendar_event_source_ref(event.connection_id, event.external_event_id),
                 ),
-                series_linked=bool(recurring_id and recurring_id in linked_recurring_ids),
+                series_linked=bool(
+                    recurring_id and
+                    recurring_id in linked_recurring_ids and
+                    event_month >= habit_active_from
+                ),
                 suggested_target_type=get_calendar_event_suggested_target_type(event),
                 recurrence=[
                     item for item in ((event.raw_payload or {}).get("recurrence") or [])
