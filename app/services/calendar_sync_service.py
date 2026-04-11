@@ -10,7 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.calendar_connection import CalendarConnection
 from app.models.calendar_provider_account import CalendarProviderAccount
 from app.models.calendar_event import CalendarEvent
+from app.models.planner_link import PlannerLink
 from app.services.calendar_bridge_service import (
+    CALENDAR_EVENT_SOURCE_KIND,
+    IMPORT_COPY_LINK_MODE,
     build_calendar_event_source_ref,
     get_calendar_event_suggested_target_type,
     list_resolved_planner_links_for_source_refs,
@@ -181,33 +184,64 @@ async def list_connection_events_in_range(
         for event, _connection in rows
     ]
     planner_links = await list_resolved_planner_links_for_source_refs(db, user_id, source_refs)
+    linked_recurring_ids: set[str] = set()
+    linked_refs_result = await db.execute(
+        select(PlannerLink.source_ref).where(
+            PlannerLink.user_id == user_id,
+            PlannerLink.source_kind == CALENDAR_EVENT_SOURCE_KIND,
+            PlannerLink.link_mode == IMPORT_COPY_LINK_MODE,
+        ),
+    )
+    linked_refs = set(linked_refs_result.scalars().all())
 
-    return [
-        CalendarEventOut(
-            planner_link=planner_links.get(build_calendar_event_source_ref(event.connection_id, event.external_event_id)),
-            suggested_target_type=get_calendar_event_suggested_target_type(event),
-            recurrence=[
-                item for item in ((event.raw_payload or {}).get("recurrence") or [])
-                if isinstance(item, str)
-            ],
-            id=event.id,
-            connection_id=event.connection_id,
-            provider=connection.provider,
-            account_label=connection.account_label,
-            external_event_id=event.external_event_id,
-            external_calendar_id=event.external_calendar_id,
-            title=event.title,
-            description=event.description,
-            location=event.location,
-            starts_at=event.starts_at,
-            ends_at=event.ends_at,
-            source_timezone=event.source_timezone,
-            is_all_day=event.is_all_day,
-            status=event.status,
-            recurring_event_id=(event.raw_payload or {}).get("recurringEventId"),
+    if linked_refs:
+        linked_events_result = await db.execute(select(CalendarEvent).where(CalendarEvent.user_id == user_id))
+        for linked_event in linked_events_result.scalars().all():
+            source_ref = build_calendar_event_source_ref(
+                linked_event.connection_id,
+                linked_event.external_event_id,
+            )
+            if source_ref not in linked_refs:
+                continue
+
+            recurring_id = (linked_event.raw_payload or {}).get("recurringEventId")
+            if isinstance(recurring_id, str) and recurring_id:
+                linked_recurring_ids.add(recurring_id)
+
+    events_out: list[CalendarEventOut] = []
+    for event, connection in rows:
+        recurring_id_value = (event.raw_payload or {}).get("recurringEventId")
+        recurring_id = recurring_id_value if isinstance(recurring_id_value, str) and recurring_id_value else None
+        events_out.append(
+            CalendarEventOut(
+                planner_link=planner_links.get(
+                    build_calendar_event_source_ref(event.connection_id, event.external_event_id),
+                ),
+                series_linked=bool(recurring_id and recurring_id in linked_recurring_ids),
+                suggested_target_type=get_calendar_event_suggested_target_type(event),
+                recurrence=[
+                    item for item in ((event.raw_payload or {}).get("recurrence") or [])
+                    if isinstance(item, str)
+                ],
+                id=event.id,
+                connection_id=event.connection_id,
+                provider=connection.provider,
+                account_label=connection.account_label,
+                external_event_id=event.external_event_id,
+                external_calendar_id=event.external_calendar_id,
+                title=event.title,
+                description=event.description,
+                location=event.location,
+                starts_at=event.starts_at,
+                ends_at=event.ends_at,
+                source_timezone=event.source_timezone,
+                is_all_day=event.is_all_day,
+                status=event.status,
+                recurring_event_id=recurring_id,
+            )
         )
-        for event, connection in rows
-    ]
+
+    return events_out
 
 
 def connection_to_schema(

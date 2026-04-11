@@ -562,6 +562,60 @@ async def test_calendar_event_import_suggests_habit_for_recurring_event_and_impo
     assert imported_event["planner_link"]["open_path"] == "/month/2026/3"
 
 
+async def test_calendar_events_mark_future_instances_of_linked_recurring_series(client):
+    email = "calendar-linked-series@example.com"
+    headers, _ = await register_and_auth(client, email)
+    first_event_id = await seed_manual_calendar_event(
+        email,
+        title="Weekly Piano",
+        external_event_id="recurring-series-1",
+        raw_payload={"recurringEventId": "series-linked-1"},
+        starts_at=datetime(2026, 3, 12, 18, 0, tzinfo=timezone.utc),
+        ends_at=datetime(2026, 3, 12, 19, 0, tzinfo=timezone.utc),
+    )
+    future_event_id = await seed_manual_calendar_event(
+        email,
+        title="Weekly Piano",
+        external_event_id="recurring-series-2",
+        raw_payload={"recurringEventId": "series-linked-1"},
+        starts_at=datetime(2026, 3, 19, 18, 0, tzinfo=timezone.utc),
+        ends_at=datetime(2026, 3, 19, 19, 0, tzinfo=timezone.utc),
+    )
+    one_off_event_id = await seed_manual_calendar_event(
+        email,
+        title="One-off Review",
+        external_event_id="single-series-1",
+        starts_at=datetime(2026, 3, 19, 9, 0, tzinfo=timezone.utc),
+        ends_at=datetime(2026, 3, 19, 10, 0, tzinfo=timezone.utc),
+    )
+
+    import_response = await client.post(
+        f"/api/v1/calendar/events/{first_event_id}/import",
+        json={
+            "target_type": "habit",
+            "title": "Weekly Piano",
+            "year": 2026,
+            "month": 3,
+        },
+        headers=headers,
+    )
+    assert import_response.status_code == 200
+
+    next_week_events_response = await client.get(
+        "/api/v1/calendar/events?date_from=2026-03-16&date_to=2026-03-22",
+        headers=headers,
+    )
+    assert next_week_events_response.status_code == 200
+    events = extract_data(next_week_events_response)["events"]
+
+    future_event = next(event for event in events if event["id"] == future_event_id)
+    one_off_event = next(event for event in events if event["id"] == one_off_event_id)
+
+    assert future_event["planner_link"] is None
+    assert future_event["series_linked"] is True
+    assert one_off_event["series_linked"] is False
+
+
 async def test_import_habit_name_conflict_with_calendar_source(client):
     email = "calendar-import-habit-conflict-source@example.com"
     headers, _ = await register_and_auth(client, email)

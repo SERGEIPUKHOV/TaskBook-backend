@@ -65,6 +65,7 @@ class CalendarConnectionOut(BaseModel):
 
 class CalendarEventOut(BaseModel):
     planner_link: "PlannerLinkOut | None" = None
+    series_linked: bool = False
     suggested_target_type: Literal["task", "habit"]
     recurrence: list[str] = Field(default_factory=list)
     id: str
