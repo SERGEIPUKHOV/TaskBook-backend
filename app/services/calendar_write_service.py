@@ -58,7 +58,7 @@ async def _resolve_google_link(
             PlannerLink.link_mode == "import_copy",
         ),
     )
-    link = link_result.scalar_one_or_none()
+    link = link_result.scalars().first()
     if link is None:
         return None
 
