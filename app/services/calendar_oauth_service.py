@@ -9,7 +9,7 @@ from app.core.config import settings
 from app.core.redis import redis_client
 
 GOOGLE_OAUTH_STATE_TTL_SECONDS = 600
-GOOGLE_OAUTH_SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
+GOOGLE_OAUTH_SCOPE = "https://www.googleapis.com/auth/calendar"
 GOOGLE_STATE_KEY = "calendar:google:state:{state}"
 
 
