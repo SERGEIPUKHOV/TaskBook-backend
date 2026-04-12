@@ -308,3 +308,44 @@ async def test_month_habits_include_linked_event_time_only_for_timed_imports(cli
         "ends_at": "2026-03-10T09:00:00+00:00",
     }
     assert habits[all_day_habit["id"]]["linked_event_time"] is None
+
+
+async def test_patch_habit_event_time(client):
+    email = "habit-event-time-edit@example.com"
+    headers, _ = await register_and_auth(client, email)
+
+    habit_response = await client.post(
+        "/api/v1/months/2026/3/habits",
+        json={"name": "Run"},
+        headers=headers,
+    )
+    assert habit_response.status_code == 201
+    habit = extract_data(habit_response)
+
+    no_link_response = await client.patch(
+        f"/api/v1/habits/{habit['id']}/event-time",
+        json={"starts_at": "09:00", "ends_at": "10:00"},
+        headers=headers,
+    )
+    assert no_link_response.status_code == 200
+    assert no_link_response.json()["data"] is None
+
+    await seed_habit_calendar_link(
+        email,
+        habit_id=habit["id"],
+        external_event_id="event-time-edit-1",
+        starts_at=datetime(2026, 3, 10, 8, 0, tzinfo=timezone.utc),
+        ends_at=datetime(2026, 3, 10, 9, 0, tzinfo=timezone.utc),
+        is_all_day=False,
+    )
+
+    patch_response = await client.patch(
+        f"/api/v1/habits/{habit['id']}/event-time",
+        json={"starts_at": "10:30", "ends_at": "11:45"},
+        headers=headers,
+    )
+    assert patch_response.status_code == 200
+    assert patch_response.json()["data"] == {
+        "starts_at": "2026-03-10T10:30:00+00:00",
+        "ends_at": "2026-03-10T11:45:00+00:00",
+    }

@@ -36,6 +36,13 @@ class HabitPatch(BaseModel):
         return normalize_schedule_days(value)
 
 
+class HabitEventTimePatch(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    starts_at: str = Field(pattern=r"^\d{2}:\d{2}$")
+    ends_at: str = Field(pattern=r"^\d{2}:\d{2}$")
+
+
 class LinkedEventTimeOut(BaseModel):
     starts_at: str
     ends_at: str

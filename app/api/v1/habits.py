@@ -9,8 +9,12 @@ from app.api.deps import get_current_user
 from app.core.database import get_db
 from app.models.user import User
 from app.schemas.common import Response
-from app.schemas.habit import HabitGridOut, HabitIn, HabitOut, HabitPatch
-from app.services.calendar_write_service import push_habit_schedule_to_google, push_habit_title_to_google
+from app.schemas.habit import HabitEventTimePatch, HabitGridOut, HabitIn, HabitOut, HabitPatch, LinkedEventTimeOut
+from app.services.calendar_write_service import (
+    push_habit_event_time_to_google,
+    push_habit_schedule_to_google,
+    push_habit_title_to_google,
+)
 from app.services.habit_service import (
     create_habit,
     delete_habit_for_month,
@@ -19,6 +23,7 @@ from app.services.habit_service import (
     log_habit_completion,
     unlog_habit_completion,
     update_habit,
+    update_habit_event_time,
 )
 
 # BLOCK-START: HABITS_API_MODULE
@@ -100,6 +105,39 @@ async def patch_habit(
         except Exception:
             pass
     return Response(data=habit)
+
+
+@router.patch("/habits/{habit_id}/event-time", response_model=Response[LinkedEventTimeOut | None])
+async def patch_habit_event_time(
+    habit_id: str,
+    data: HabitEventTimePatch,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Response[LinkedEventTimeOut | None]:
+    """
+    function_contracts:
+      patch_habit_event_time:
+        description: "Updates time component of the linked CalendarEvent for an imported habit."
+        preconditions:
+          - "habit_id identifies an existing user-owned habit"
+          - "habit has a PlannerLink to a non-all-day CalendarEvent"
+        postconditions:
+          - "Returns updated LinkedEventTimeOut, or null when no linked event"
+          - "Best-effort pushes new time to Google Calendar master event"
+    """
+    result = await update_habit_event_time(
+        db,
+        current_user.id,
+        habit_id,
+        data.starts_at,
+        data.ends_at,
+    )
+    if result is not None:
+        try:
+            await push_habit_event_time_to_google(db, current_user.id, habit_id, data.starts_at, data.ends_at)
+        except Exception:
+            pass
+    return Response(data=result)
 
 
 @router.delete("/habits/{habit_id}", status_code=status.HTTP_204_NO_CONTENT)

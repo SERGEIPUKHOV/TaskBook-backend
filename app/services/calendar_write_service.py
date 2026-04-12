@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import timezone
 from typing import Any
 from urllib.parse import quote
 
@@ -253,6 +254,58 @@ async def push_habit_schedule_to_google(
             )
     except Exception:
         logger.debug("push_habit_schedule_to_google: best-effort failed for habit %s", habit_id, exc_info=True)
+
+
+async def push_habit_event_time_to_google(
+    db: AsyncSession,
+    user_id: str,
+    habit_id: str,
+    starts_hhmm: str,
+    ends_hhmm: str,
+) -> None:
+    """Best-effort: update Google master-event start/end time (HH:MM UTC)."""
+    try:
+        resolved = await _resolve_google_link(db, user_id, "habit", habit_id)
+        if resolved is None:
+            return
+
+        event, connection, provider_account = resolved
+        access_token, token_changed = await _ensure_google_access_token(provider_account)
+        if token_changed:
+            await db.commit()
+            await db.refresh(provider_account)
+
+        if event.starts_at is None or event.ends_at is None:
+            return
+
+        raw_payload = event.raw_payload or {}
+        master_id = str(raw_payload.get("recurringEventId") or event.external_event_id)
+        calendar_id = connection.external_account_id
+
+        base_start = event.starts_at if event.starts_at.tzinfo is not None else event.starts_at.replace(tzinfo=timezone.utc)
+        base_end = event.ends_at if event.ends_at.tzinfo is not None else event.ends_at.replace(tzinfo=timezone.utc)
+
+        start_h, start_m = (int(value) for value in starts_hhmm.split(":"))
+        end_h, end_m = (int(value) for value in ends_hhmm.split(":"))
+
+        new_start = base_start.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
+        new_end = base_end.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
+
+        await _google_patch(
+            access_token,
+            calendar_id,
+            master_id,
+            {
+                "start": {"dateTime": new_start.isoformat(), "timeZone": "UTC"},
+                "end": {"dateTime": new_end.isoformat(), "timeZone": "UTC"},
+            },
+        )
+    except Exception:
+        logger.debug(
+            "push_habit_event_time_to_google: best-effort failed for habit %s",
+            habit_id,
+            exc_info=True,
+        )
 
 
 def _parse_rrule_schedule_days(rrule_str: str) -> list[int] | None:

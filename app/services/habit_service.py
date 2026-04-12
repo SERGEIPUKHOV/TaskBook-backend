@@ -144,6 +144,61 @@ async def _fetch_linked_event_times(
     return result
 
 
+async def update_habit_event_time(
+    db: AsyncSession,
+    user_id: str,
+    habit_id: str,
+    starts_hhmm: str,
+    ends_hhmm: str,
+) -> LinkedEventTimeOut | None:
+    """Replace time component of the linked CalendarEvent. Returns None if no link found."""
+    link_result = await db.execute(
+        select(PlannerLink).where(
+            PlannerLink.user_id == user_id,
+            PlannerLink.target_kind == "habit",
+            PlannerLink.target_id == habit_id,
+            PlannerLink.source_kind == "calendar_event",
+            PlannerLink.link_mode == "import_copy",
+        )
+    )
+    link = link_result.scalars().first()
+    if link is None:
+        return None
+
+    connection_id, separator, external_event_id = link.source_ref.partition(":")
+    if not separator or not connection_id or not external_event_id:
+        return None
+
+    event_result = await db.execute(
+        select(CalendarEvent).where(
+            CalendarEvent.connection_id == connection_id,
+            CalendarEvent.external_event_id == external_event_id,
+            CalendarEvent.user_id == user_id,
+            CalendarEvent.is_all_day.is_(False),
+        )
+    )
+    event = event_result.scalar_one_or_none()
+    if event is None or event.starts_at is None or event.ends_at is None:
+        return None
+
+    start_h, start_m = (int(value) for value in starts_hhmm.split(":"))
+    end_h, end_m = (int(value) for value in ends_hhmm.split(":"))
+
+    base_start = event.starts_at if event.starts_at.tzinfo is None else event.starts_at.replace(tzinfo=None)
+    base_end = event.ends_at if event.ends_at.tzinfo is None else event.ends_at.replace(tzinfo=None)
+
+    event.starts_at = base_start.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
+    event.ends_at = base_end.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
+
+    await db.commit()
+    await db.refresh(event)
+
+    return LinkedEventTimeOut(
+        starts_at=_utc_iso(event.starts_at),
+        ends_at=_utc_iso(event.ends_at),
+    )
+
+
 async def get_month_habit_grid(db: AsyncSession, user_id: str, year: int, month: int) -> HabitGridOut:
     target_month_key = _validated_month_key(year, month)
     habits_result = await db.execute(await _active_habit_query(user_id, target_month_key))

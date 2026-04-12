@@ -12,6 +12,7 @@ from app.models.planner_link import PlannerLink
 from app.models.user import User
 from app.services.calendar_write_service import (
     _build_updated_rrule,
+    push_habit_event_time_to_google,
     push_habit_schedule_to_google,
     push_habit_title_to_google,
     push_task_title_to_google,
@@ -373,6 +374,49 @@ async def test_push_habit_schedule_to_google_patches_rrule_and_syncs(client, mon
     assert sync_calls[0][0] == link_meta["connection_id"]
 
 
+async def test_push_habit_event_time_to_google_patches_master_event(client, monkeypatch):
+    email = "calendar-write-habit-time@example.com"
+    headers, _ = await register_and_auth(client, email)
+    habit = await create_habit(client, headers)
+    await seed_calendar_import_link(
+        email,
+        target_kind="habit",
+        target_id=habit["id"],
+        provider="google",
+        external_account_id="primary",
+        external_event_id="google-habit-instance-time",
+        raw_payload={"recurringEventId": "google-master-time"},
+    )
+    patch_calls: list[tuple[str, str, str, dict]] = []
+
+    async def fake_ensure_google_access_token(_provider_account: CalendarProviderAccount) -> tuple[str, bool]:
+        return "google-access-token", False
+
+    async def fake_google_patch(access_token: str, calendar_id: str, event_id: str, body: dict) -> None:
+        patch_calls.append((access_token, calendar_id, event_id, body))
+
+    monkeypatch.setattr(
+        "app.services.calendar_write_service._ensure_google_access_token",
+        fake_ensure_google_access_token,
+    )
+    monkeypatch.setattr("app.services.calendar_write_service._google_patch", fake_google_patch)
+
+    async with AsyncSessionLocal() as session:
+        await push_habit_event_time_to_google(session, await get_user_id(email), habit["id"], "10:30", "11:45")
+
+    assert patch_calls == [
+        (
+            "google-access-token",
+            "primary",
+            "google-master-time",
+            {
+                "start": {"dateTime": "2026-03-10T10:30:00+00:00", "timeZone": "UTC"},
+                "end": {"dateTime": "2026-03-10T11:45:00+00:00", "timeZone": "UTC"},
+            },
+        ),
+    ]
+
+
 async def test_push_habit_schedule_to_google_fetches_master_rrule_when_missing_locally(client, monkeypatch):
     email = "calendar-write-schedule-fetch@example.com"
     headers, _ = await register_and_auth(client, email)
@@ -540,3 +584,23 @@ async def test_patch_habit_route_stays_200_when_schedule_writeback_fails(client,
 
     assert response.status_code == 200
     assert extract_data(response)["schedule_days"] == [1, 3, 5]
+
+
+async def test_patch_habit_event_time_route_stays_200_when_writeback_fails(client, monkeypatch):
+    email = "calendar-write-habit-time-route@example.com"
+    headers, _ = await register_and_auth(client, email)
+    habit = await create_habit(client, headers)
+
+    async def fake_push_habit_event_time_to_google(*_args, **_kwargs) -> None:
+        raise RuntimeError("Google unavailable")
+
+    monkeypatch.setattr("app.api.v1.habits.push_habit_event_time_to_google", fake_push_habit_event_time_to_google)
+
+    response = await client.patch(
+        f"/api/v1/habits/{habit['id']}/event-time",
+        json={"starts_at": "09:00", "ends_at": "10:00"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"] is None
