@@ -211,7 +211,7 @@ async def test_calendar_google_auth_session_builds_authorize_url(client, auth_he
         assert parsed.netloc == "accounts.google.com"
         assert query["client_id"] == ["google-client-id"]
         assert query["redirect_uri"] == ["http://localhost:8000/api/v1/calendar/google/callback"]
-        assert query["scope"] == ["https://www.googleapis.com/auth/calendar.readonly"]
+        assert query["scope"] == ["https://www.googleapis.com/auth/calendar"]
         assert query["state"]
     finally:
         settings.GOOGLE_CALENDAR_CLIENT_ID = original_client_id

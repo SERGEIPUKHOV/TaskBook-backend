@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 GOOGLE_API_BASE = "https://www.googleapis.com/calendar/v3"
 ISO_DAY_TO_BYDAY = {1: "MO", 2: "TU", 3: "WE", 4: "TH", 5: "FR", 6: "SA", 7: "SU"}
+BYDAY_TO_ISO_DAY = {v: k for k, v in ISO_DAY_TO_BYDAY.items()}
 
 
 async def _google_patch(
@@ -252,3 +253,102 @@ async def push_habit_schedule_to_google(
             )
     except Exception:
         logger.debug("push_habit_schedule_to_google: best-effort failed for habit %s", habit_id, exc_info=True)
+
+
+def _parse_rrule_schedule_days(rrule_str: str) -> list[int] | None:
+    """Parse BYDAY from RRULE string → sorted ISO day list, or None if FREQ≠WEEKLY / no BYDAY."""
+    body = rrule_str[len("RRULE:"):] if rrule_str.startswith("RRULE:") else rrule_str
+    props: dict[str, str] = {}
+    for part in body.split(";"):
+        if "=" in part:
+            k, _, v = part.partition("=")
+            props[k.upper()] = v
+
+    if props.get("FREQ", "").upper() != "WEEKLY":
+        return None
+
+    byday = props.get("BYDAY", "")
+    if not byday:
+        return None
+
+    days: list[int] = []
+    for code in byday.split(","):
+        # Handle offset codes like 1MO or -1FR → take last 2 chars
+        day_code = code.strip().upper()[-2:]
+        if day_code in BYDAY_TO_ISO_DAY:
+            days.append(BYDAY_TO_ISO_DAY[day_code])
+
+    return sorted(set(days)) if days else None
+
+
+async def backpropagate_google_rrule_to_habits(
+    db: AsyncSession,
+    connection_id: str,
+    user_id: str,
+    synced_events: list[Any],
+) -> None:
+    """Best-effort: after Google sync, update habit.schedule_days when linked master event RRULE changed."""
+    try:
+        from app.models.habit import Habit
+        from app.schemas.habit import HabitPatch
+        from app.services.habit_service import update_habit
+
+        # Collect source_ref → rrule for every synced event that carries recurrence
+        rrule_by_source_ref: dict[str, str] = {}
+        for event in synced_events:
+            raw = getattr(event, "raw_payload", None) or {}
+            recurrence = raw.get("recurrence") or []
+            rrule = next((r for r in recurrence if isinstance(r, str) and r.startswith("RRULE:")), None)
+            if rrule:
+                source_ref = f"{connection_id}:{event.external_event_id}"
+                rrule_by_source_ref[source_ref] = rrule
+
+        if not rrule_by_source_ref:
+            return
+
+        # Find habit PlannerLinks for these events in one query
+        links_result = await db.execute(
+            select(PlannerLink).where(
+                PlannerLink.user_id == user_id,
+                PlannerLink.source_kind == "calendar_event",
+                PlannerLink.link_mode == "import_copy",
+                PlannerLink.target_kind == "habit",
+                PlannerLink.source_ref.in_(list(rrule_by_source_ref.keys())),
+            ),
+        )
+        links = links_result.scalars().all()
+        if not links:
+            return
+
+        # Fetch habits in one query
+        habit_ids = list({link.target_id for link in links})
+        habits_result = await db.execute(
+            select(Habit).where(
+                Habit.id.in_(habit_ids),
+                Habit.user_id == user_id,
+            ),
+        )
+        habits_by_id = {str(h.id): h for h in habits_result.scalars().all()}
+
+        for link in links:
+            rrule = rrule_by_source_ref.get(link.source_ref)
+            if not rrule:
+                continue
+            new_days = _parse_rrule_schedule_days(rrule)
+            if new_days is None:
+                continue
+            habit = habits_by_id.get(str(link.target_id))
+            if habit is None:
+                continue
+            current_days = sorted(habit.schedule_days or [])
+            if current_days == new_days:
+                continue
+            await update_habit(db, user_id, str(link.target_id), HabitPatch(schedule_days=new_days))
+            logger.debug(
+                "backpropagate_google_rrule_to_habits: habit %s schedule_days %s → %s",
+                link.target_id,
+                current_days,
+                new_days,
+            )
+    except Exception:
+        logger.debug("backpropagate_google_rrule_to_habits: best-effort failed", exc_info=True)
