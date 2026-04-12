@@ -10,6 +10,7 @@ from app.core.database import get_db
 from app.models.user import User
 from app.schemas.common import Response
 from app.schemas.habit import HabitGridOut, HabitIn, HabitOut, HabitPatch
+from app.services.calendar_write_service import push_habit_title_to_google
 from app.services.habit_service import (
     create_habit,
     delete_habit_for_month,
@@ -87,7 +88,13 @@ async def patch_habit(
           - "Returns the updated HabitOut"
           - "404 when the habit is missing"
     """
-    return Response(data=await update_habit(db, current_user.id, habit_id, data))
+    habit = await update_habit(db, current_user.id, habit_id, data)
+    if data.name is not None:
+        try:
+            await push_habit_title_to_google(db, current_user.id, habit_id, habit.name)
+        except Exception:
+            pass
+    return Response(data=habit)
 
 
 @router.delete("/habits/{habit_id}", status_code=status.HTTP_204_NO_CONTENT)

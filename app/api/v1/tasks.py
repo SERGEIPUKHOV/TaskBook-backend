@@ -10,6 +10,7 @@ from app.core.database import get_db
 from app.models.user import User
 from app.schemas.common import Response
 from app.schemas.task import TaskDayStatusIn, TaskDayStatusOut, TaskOut, TaskPatch
+from app.services.calendar_write_service import push_task_title_to_google
 from app.services.task_service import delete_task, delete_task_status, set_task_status, update_task
 
 router = APIRouter()
@@ -22,7 +23,13 @@ async def patch_task(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response[TaskOut]:
-    return Response(data=await update_task(db, current_user.id, task_id, data))
+    task = await update_task(db, current_user.id, task_id, data)
+    if data.title is not None:
+        try:
+            await push_task_title_to_google(db, current_user.id, task_id, task.title)
+        except Exception:
+            pass
+    return Response(data=task)
 
 
 @router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
