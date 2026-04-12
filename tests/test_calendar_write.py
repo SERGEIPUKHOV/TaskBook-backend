@@ -10,6 +10,7 @@ from app.models.calendar_event import CalendarEvent
 from app.models.calendar_provider_account import CalendarProviderAccount
 from app.models.planner_link import PlannerLink
 from app.models.user import User
+import app.services.calendar_write_service as _cws
 from app.services.calendar_write_service import (
     _build_updated_rrule,
     push_habit_event_time_to_google,
@@ -395,11 +396,18 @@ async def test_push_habit_event_time_to_google_patches_master_event(client, monk
     async def fake_google_patch(access_token: str, calendar_id: str, event_id: str, body: dict) -> None:
         patch_calls.append((access_token, calendar_id, event_id, body))
 
+    async def fake_fetch_google_event(access_token: str, calendar_id: str, event_id: str) -> dict:
+        return {
+            "start": {"dateTime": "2026-03-10T09:30:00+00:00"},
+            "end": {"dateTime": "2026-03-10T11:00:00+00:00"},
+        }
+
     monkeypatch.setattr(
         "app.services.calendar_write_service._ensure_google_access_token",
         fake_ensure_google_access_token,
     )
     monkeypatch.setattr("app.services.calendar_write_service._google_patch", fake_google_patch)
+    monkeypatch.setattr(_cws, "_fetch_google_event", fake_fetch_google_event)
 
     async with AsyncSessionLocal() as session:
         await push_habit_event_time_to_google(session, await get_user_id(email), habit["id"], "10:30", "11:45")

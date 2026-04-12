@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import timezone
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote
 
@@ -175,22 +175,33 @@ def _build_updated_rrule(existing_rrule: str, new_schedule_days: list[int]) -> s
     return f"{prefix}{rrule_body}"
 
 
+async def _fetch_google_event(
+    access_token: str,
+    calendar_id: str,
+    event_id: str,
+) -> dict | None:
+    """Fetch a single Google Calendar event by ID. Returns None on any error."""
+    from app.services.calendar_google_service import _google_get
+
+    try:
+        encoded_calendar_id = quote(calendar_id, safe="")
+        encoded_event_id = quote(event_id, safe="")
+        return await _google_get(access_token, f"/calendars/{encoded_calendar_id}/events/{encoded_event_id}")
+    except Exception:
+        return None
+
+
 async def _get_master_rrule_from_google(
     access_token: str,
     calendar_id: str,
     master_id: str,
 ) -> str | None:
-    """Fetch master event directly from Google and return the first RRULE item."""
-    from app.services.calendar_google_service import _google_get
-
-    try:
-        encoded_calendar_id = quote(calendar_id, safe="")
-        encoded_event_id = quote(master_id, safe="")
-        data = await _google_get(access_token, f"/calendars/{encoded_calendar_id}/events/{encoded_event_id}")
-        recurrence = data.get("recurrence") or []
-        return next((item for item in recurrence if isinstance(item, str) and item.startswith("RRULE:")), None)
-    except Exception:
+    """Fetch master event from Google and return the first RRULE item."""
+    data = await _fetch_google_event(access_token, calendar_id, master_id)
+    if data is None:
         return None
+    recurrence = data.get("recurrence") or []
+    return next((item for item in recurrence if isinstance(item, str) and item.startswith("RRULE:")), None)
 
 
 async def push_habit_schedule_to_google(
@@ -263,7 +274,12 @@ async def push_habit_event_time_to_google(
     starts_hhmm: str,
     ends_hhmm: str,
 ) -> None:
-    """Best-effort: update Google master-event start/end time (HH:MM UTC)."""
+    """Best-effort: update Google event start/end time (HH:MM UTC).
+
+    For recurring events: fetches the master event to use its own original date,
+    then patches the master so all instances update via next sync.
+    For non-recurring events: patches the event directly using its own date.
+    """
     try:
         resolved = await _resolve_google_link(db, user_id, "habit", habit_id)
         if resolved is None:
@@ -279,14 +295,36 @@ async def push_habit_event_time_to_google(
             return
 
         raw_payload = event.raw_payload or {}
-        master_id = str(raw_payload.get("recurringEventId") or event.external_event_id)
+        recurring_event_id = raw_payload.get("recurringEventId")
         calendar_id = connection.external_account_id
-
-        base_start = event.starts_at if event.starts_at.tzinfo is not None else event.starts_at.replace(tzinfo=timezone.utc)
-        base_end = event.ends_at if event.ends_at.tzinfo is not None else event.ends_at.replace(tzinfo=timezone.utc)
 
         start_h, start_m = (int(value) for value in starts_hhmm.split(":"))
         end_h, end_m = (int(value) for value in ends_hhmm.split(":"))
+
+        if recurring_event_id:
+            # Recurring: must patch the master using the master's own start date.
+            # Using an instance's date would shift the entire series to a different date.
+            master_data = await _fetch_google_event(access_token, calendar_id, recurring_event_id)
+            if master_data is None:
+                logger.debug("push_habit_event_time_to_google: could not fetch master for habit %s", habit_id)
+                return
+
+            master_start_str = (master_data.get("start") or {}).get("dateTime")
+            master_end_str = (master_data.get("end") or {}).get("dateTime")
+            if not master_start_str or not master_end_str:
+                return
+
+            base_start = datetime.fromisoformat(master_start_str)
+            base_end = datetime.fromisoformat(master_end_str)
+            if base_start.tzinfo is None:
+                base_start = base_start.replace(tzinfo=timezone.utc)
+            if base_end.tzinfo is None:
+                base_end = base_end.replace(tzinfo=timezone.utc)
+            target_id = recurring_event_id
+        else:
+            base_start = event.starts_at if event.starts_at.tzinfo is not None else event.starts_at.replace(tzinfo=timezone.utc)
+            base_end = event.ends_at if event.ends_at.tzinfo is not None else event.ends_at.replace(tzinfo=timezone.utc)
+            target_id = event.external_event_id
 
         new_start = base_start.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
         new_end = base_end.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
@@ -294,7 +332,7 @@ async def push_habit_event_time_to_google(
         await _google_patch(
             access_token,
             calendar_id,
-            master_id,
+            target_id,
             {
                 "start": {"dateTime": new_start.isoformat(), "timeZone": "UTC"},
                 "end": {"dateTime": new_end.isoformat(), "timeZone": "UTC"},
