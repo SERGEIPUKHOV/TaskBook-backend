@@ -10,7 +10,12 @@ from app.models.calendar_event import CalendarEvent
 from app.models.calendar_provider_account import CalendarProviderAccount
 from app.models.planner_link import PlannerLink
 from app.models.user import User
-from app.services.calendar_write_service import push_habit_title_to_google, push_task_title_to_google
+from app.services.calendar_write_service import (
+    _build_updated_rrule,
+    push_habit_schedule_to_google,
+    push_habit_title_to_google,
+    push_task_title_to_google,
+)
 from tests.helpers import extract_data, register_and_auth
 
 
@@ -118,6 +123,26 @@ async def get_user_id(email: str) -> str:
         return user_result.scalar_one().id
 
 
+def test_build_updated_rrule_replaces_byday() -> None:
+    assert _build_updated_rrule("RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR;WKST=MO", [1, 3, 5, 6]) == (
+        "RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR,SA;WKST=MO"
+    )
+
+
+def test_build_updated_rrule_preserves_extra_parts() -> None:
+    assert _build_updated_rrule("RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=5;WKST=MO", [2, 4]) == (
+        "RRULE:FREQ=WEEKLY;BYDAY=TU,TH;COUNT=5;WKST=MO"
+    )
+
+
+def test_build_updated_rrule_adds_byday_when_missing() -> None:
+    assert _build_updated_rrule("RRULE:FREQ=WEEKLY", [5]) == "RRULE:FREQ=WEEKLY;BYDAY=FR"
+
+
+def test_build_updated_rrule_returns_none_for_non_weekly() -> None:
+    assert _build_updated_rrule("RRULE:FREQ=DAILY;BYDAY=MO", [1, 3, 5]) is None
+
+
 async def test_push_task_title_to_google_without_link_does_nothing(client, monkeypatch):
     email = "calendar-write-task-nolink@example.com"
     headers, _ = await register_and_auth(client, email)
@@ -133,6 +158,29 @@ async def test_push_task_title_to_google_without_link_does_nothing(client, monke
         await push_task_title_to_google(session, await get_user_id(email), task["id"], "Renamed task")
 
     assert patch_calls == []
+
+
+async def test_push_habit_schedule_to_google_without_link_does_nothing(client, monkeypatch):
+    email = "calendar-write-schedule-nolink@example.com"
+    headers, _ = await register_and_auth(client, email)
+    habit = await create_habit(client, headers)
+    patch_calls: list[tuple[str, str, str, dict]] = []
+    sync_calls: list[tuple[str, str | None]] = []
+
+    async def fake_google_patch(access_token: str, calendar_id: str, event_id: str, body: dict) -> None:
+        patch_calls.append((access_token, calendar_id, event_id, body))
+
+    async def fake_sync_google_connection(db, connection, *, provider_account=None) -> None:
+        sync_calls.append((connection.id, provider_account.id if provider_account else None))
+
+    monkeypatch.setattr("app.services.calendar_write_service._google_patch", fake_google_patch)
+    monkeypatch.setattr("app.services.calendar_google_service.sync_google_connection", fake_sync_google_connection)
+
+    async with AsyncSessionLocal() as session:
+        await push_habit_schedule_to_google(session, await get_user_id(email), habit["id"], [1, 3, 5])
+
+    assert patch_calls == []
+    assert sync_calls == []
 
 
 async def test_push_task_title_to_google_ignores_apple_links(client, monkeypatch):
@@ -278,6 +326,103 @@ async def test_push_habit_title_to_google_uses_event_id_for_standalone_event(cli
     ]
 
 
+async def test_push_habit_schedule_to_google_patches_rrule_and_syncs(client, monkeypatch):
+    email = "calendar-write-schedule-google@example.com"
+    headers, _ = await register_and_auth(client, email)
+    habit = await create_habit(client, headers)
+    link_meta = await seed_calendar_import_link(
+        email,
+        target_kind="habit",
+        target_id=habit["id"],
+        provider="google",
+        external_account_id="primary",
+        external_event_id="google-habit-instance-1",
+        raw_payload={"recurringEventId": "google-master-2", "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR;WKST=MO"]},
+    )
+    patch_calls: list[tuple[str, str, str, dict]] = []
+    sync_calls: list[tuple[str, str | None]] = []
+
+    async def fake_ensure_google_access_token(_provider_account: CalendarProviderAccount) -> tuple[str, bool]:
+        return "google-access-token", False
+
+    async def fake_google_patch(access_token: str, calendar_id: str, event_id: str, body: dict) -> None:
+        patch_calls.append((access_token, calendar_id, event_id, body))
+
+    async def fake_sync_google_connection(db, connection, *, provider_account=None) -> None:
+        sync_calls.append((connection.id, provider_account.id if provider_account else None))
+
+    monkeypatch.setattr(
+        "app.services.calendar_write_service._ensure_google_access_token",
+        fake_ensure_google_access_token,
+    )
+    monkeypatch.setattr("app.services.calendar_write_service._google_patch", fake_google_patch)
+    monkeypatch.setattr("app.services.calendar_google_service.sync_google_connection", fake_sync_google_connection)
+
+    async with AsyncSessionLocal() as session:
+        await push_habit_schedule_to_google(session, await get_user_id(email), habit["id"], [1, 3, 5, 6])
+
+    assert patch_calls == [
+        (
+            "google-access-token",
+            "primary",
+            "google-master-2",
+            {"recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR,SA;WKST=MO"]},
+        ),
+    ]
+    assert len(sync_calls) == 1
+    assert sync_calls[0][0] == link_meta["connection_id"]
+
+
+async def test_push_habit_schedule_to_google_fetches_master_rrule_when_missing_locally(client, monkeypatch):
+    email = "calendar-write-schedule-fetch@example.com"
+    headers, _ = await register_and_auth(client, email)
+    habit = await create_habit(client, headers)
+    await seed_calendar_import_link(
+        email,
+        target_kind="habit",
+        target_id=habit["id"],
+        provider="google",
+        external_account_id="primary",
+        external_event_id="google-habit-instance-fetch",
+        raw_payload={"recurringEventId": "google-master-fetch"},
+    )
+    patch_calls: list[tuple[str, str, str, dict]] = []
+
+    async def fake_ensure_google_access_token(_provider_account: CalendarProviderAccount) -> tuple[str, bool]:
+        return "google-access-token", False
+
+    async def fake_google_get(access_token: str, path: str, params=None) -> dict:
+        assert access_token == "google-access-token"
+        assert path == "/calendars/primary/events/google-master-fetch"
+        return {"recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=TU,TH;WKST=MO"]}
+
+    async def fake_google_patch(access_token: str, calendar_id: str, event_id: str, body: dict) -> None:
+        patch_calls.append((access_token, calendar_id, event_id, body))
+
+    async def fake_sync_google_connection(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "app.services.calendar_write_service._ensure_google_access_token",
+        fake_ensure_google_access_token,
+    )
+    monkeypatch.setattr("app.services.calendar_google_service._google_get", fake_google_get)
+    monkeypatch.setattr("app.services.calendar_write_service._google_patch", fake_google_patch)
+    monkeypatch.setattr("app.services.calendar_google_service.sync_google_connection", fake_sync_google_connection)
+
+    async with AsyncSessionLocal() as session:
+        await push_habit_schedule_to_google(session, await get_user_id(email), habit["id"], [2, 4, 6])
+
+    assert patch_calls == [
+        (
+            "google-access-token",
+            "primary",
+            "google-master-fetch",
+            {"recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=TU,TH,SA;WKST=MO"]},
+        ),
+    ]
+
+
 async def test_push_task_title_to_google_swallows_google_errors(client, monkeypatch):
     email = "calendar-write-task-errors@example.com"
     headers, _ = await register_and_auth(client, email)
@@ -305,6 +450,36 @@ async def test_push_task_title_to_google_swallows_google_errors(client, monkeypa
 
     async with AsyncSessionLocal() as session:
         await push_task_title_to_google(session, await get_user_id(email), task["id"], "Renamed task")
+
+
+async def test_push_habit_schedule_to_google_swallows_google_errors(client, monkeypatch):
+    email = "calendar-write-schedule-errors@example.com"
+    headers, _ = await register_and_auth(client, email)
+    habit = await create_habit(client, headers)
+    await seed_calendar_import_link(
+        email,
+        target_kind="habit",
+        target_id=habit["id"],
+        provider="google",
+        external_account_id="primary",
+        external_event_id="google-habit-error-1",
+        raw_payload={"recurringEventId": "google-master-error", "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=MO"]},
+    )
+
+    async def fake_ensure_google_access_token(_provider_account: CalendarProviderAccount) -> tuple[str, bool]:
+        return "google-access-token", False
+
+    async def fake_google_patch(*_args, **_kwargs) -> None:
+        raise RuntimeError("Google unavailable")
+
+    monkeypatch.setattr(
+        "app.services.calendar_write_service._ensure_google_access_token",
+        fake_ensure_google_access_token,
+    )
+    monkeypatch.setattr("app.services.calendar_write_service._google_patch", fake_google_patch)
+
+    async with AsyncSessionLocal() as session:
+        await push_habit_schedule_to_google(session, await get_user_id(email), habit["id"], [1, 3, 5])
 
 
 async def test_patch_task_route_stays_200_when_writeback_fails(client, monkeypatch):
@@ -345,3 +520,23 @@ async def test_patch_habit_route_stays_200_when_writeback_fails(client, monkeypa
 
     assert response.status_code == 200
     assert extract_data(response)["name"] == "Renamed via route"
+
+
+async def test_patch_habit_route_stays_200_when_schedule_writeback_fails(client, monkeypatch):
+    email = "calendar-write-habit-schedule-route@example.com"
+    headers, _ = await register_and_auth(client, email)
+    habit = await create_habit(client, headers)
+
+    async def fake_push_habit_schedule_to_google(*_args, **_kwargs) -> None:
+        raise RuntimeError("Google unavailable")
+
+    monkeypatch.setattr("app.api.v1.habits.push_habit_schedule_to_google", fake_push_habit_schedule_to_google)
+
+    response = await client.patch(
+        f"/api/v1/habits/{habit['id']}",
+        json={"schedule_days": [5, 1, 3]},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert extract_data(response)["schedule_days"] == [1, 3, 5]

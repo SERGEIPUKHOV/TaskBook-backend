@@ -9,7 +9,7 @@
 - Собирать week/month/day bundles из нескольких сущностей.
 - Инкапсулировать auth logic: регистрация, логин, refresh, logout, reset password, seed users.
 - Централизовать расчёты периода и ISO week helpers.
-- Синхронизировать внешние календарные события, управлять импортом события в planner через backend-owned link layer, публиковать opt-in задачи в ICS feeds и делать best-effort write-back имени в Google Calendar.
+- Синхронизировать внешние календарные события, управлять импортом события в planner через backend-owned link layer, публиковать opt-in задачи в ICS feeds и делать best-effort write-back имени и weekly RRULE в Google Calendar.
 
 ## Граница (что НЕ делает этот модуль)
 - Не объявляет HTTP routes и не работает с FastAPI `Request`/`Response`.
@@ -35,7 +35,7 @@
 | `calendar_service.py` | Calendar connections, event range read, import orchestration facade |
 | `calendar_bridge_service.py` | Calendar -> planner import rules, link resolution и idempotency |
 | `calendar_task_export_service.py` | Tokenized task-feed links и ICS export по buckets |
-| `calendar_write_service.py` | Best-effort Google Calendar write-back для imported task/habit summary |
+| `calendar_write_service.py` | Best-effort Google Calendar write-back для imported task/habit summary и habit RRULE/BYDAY |
 | `calendar_sync_service.py` | Normalized event upsert/sync helpers |
 | `calendar_google_service.py` | Google Calendar OAuth/token and provider sync logic |
 | `calendar_ics_service.py` | Apple ICS fetch/parse/sync logic |

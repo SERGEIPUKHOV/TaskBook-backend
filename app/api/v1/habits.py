@@ -10,7 +10,7 @@ from app.core.database import get_db
 from app.models.user import User
 from app.schemas.common import Response
 from app.schemas.habit import HabitGridOut, HabitIn, HabitOut, HabitPatch
-from app.services.calendar_write_service import push_habit_title_to_google
+from app.services.calendar_write_service import push_habit_schedule_to_google, push_habit_title_to_google
 from app.services.habit_service import (
     create_habit,
     delete_habit_for_month,
@@ -92,6 +92,11 @@ async def patch_habit(
     if data.name is not None:
         try:
             await push_habit_title_to_google(db, current_user.id, habit_id, habit.name)
+        except Exception:
+            pass
+    if data.schedule_days is not None:
+        try:
+            await push_habit_schedule_to_google(db, current_user.id, habit_id, data.schedule_days)
         except Exception:
             pass
     return Response(data=habit)

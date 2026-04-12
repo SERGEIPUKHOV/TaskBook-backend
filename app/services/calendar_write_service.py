@@ -18,6 +18,7 @@ from app.services.calendar_sync_service import CalendarSyncError
 logger = logging.getLogger(__name__)
 
 GOOGLE_API_BASE = "https://www.googleapis.com/calendar/v3"
+ISO_DAY_TO_BYDAY = {1: "MO", 2: "TU", 3: "WE", 4: "TH", 5: "FR", 6: "SA", 7: "SU"}
 
 
 async def _google_patch(
@@ -144,3 +145,110 @@ async def push_habit_title_to_google(
         await _google_patch(access_token, connection.external_account_id, event_id, {"summary": new_name})
     except Exception:
         logger.debug("push_habit_title_to_google: best-effort failed for habit %s", habit_id, exc_info=True)
+
+
+def _build_updated_rrule(existing_rrule: str, new_schedule_days: list[int]) -> str | None:
+    """Replace BYDAY inside an existing weekly RRULE while preserving other RRULE parts."""
+    prefix = "RRULE:" if existing_rrule.startswith("RRULE:") else ""
+    body = existing_rrule[len(prefix):]
+    props: dict[str, str] = {}
+
+    for part in body.split(";"):
+        if "=" in part:
+            key, _, value = part.partition("=")
+            props[key.upper()] = value
+        elif part:
+            props[part.upper()] = ""
+
+    if props.get("FREQ", "").upper() != "WEEKLY":
+        return None
+
+    byday_codes = [ISO_DAY_TO_BYDAY[day] for day in sorted(set(new_schedule_days)) if day in ISO_DAY_TO_BYDAY]
+    if not byday_codes:
+        return None
+
+    props["BYDAY"] = ",".join(byday_codes)
+    ordered_keys = ["FREQ", "BYDAY"] + sorted(key for key in props if key not in ("FREQ", "BYDAY"))
+    rrule_body = ";".join(f"{key}={props[key]}" if props[key] else key for key in ordered_keys if key in props)
+    return f"{prefix}{rrule_body}"
+
+
+async def _get_master_rrule_from_google(
+    access_token: str,
+    calendar_id: str,
+    master_id: str,
+) -> str | None:
+    """Fetch master event directly from Google and return the first RRULE item."""
+    from app.services.calendar_google_service import _google_get
+
+    try:
+        encoded_calendar_id = quote(calendar_id, safe="")
+        encoded_event_id = quote(master_id, safe="")
+        data = await _google_get(access_token, f"/calendars/{encoded_calendar_id}/events/{encoded_event_id}")
+        recurrence = data.get("recurrence") or []
+        return next((item for item in recurrence if isinstance(item, str) and item.startswith("RRULE:")), None)
+    except Exception:
+        return None
+
+
+async def push_habit_schedule_to_google(
+    db: AsyncSession,
+    user_id: str,
+    habit_id: str,
+    new_schedule_days: list[int],
+) -> None:
+    """Best-effort: update Google master-event BYDAY and sync the connection immediately."""
+    try:
+        resolved = await _resolve_google_link(db, user_id, "habit", habit_id)
+        if resolved is None:
+            return
+
+        event, connection, provider_account = resolved
+        access_token, token_changed = await _ensure_google_access_token(provider_account)
+        if token_changed:
+            await db.commit()
+            await db.refresh(provider_account)
+
+        raw_payload = event.raw_payload or {}
+        master_id = str(raw_payload.get("recurringEventId") or event.external_event_id)
+        calendar_id = connection.external_account_id
+
+        recurrence_items = [item for item in (raw_payload.get("recurrence") or []) if isinstance(item, str)]
+        existing_rrule = next((item for item in recurrence_items if item.startswith("RRULE:")), None)
+        if existing_rrule is None:
+            existing_rrule = await _get_master_rrule_from_google(access_token, calendar_id, master_id)
+        if existing_rrule is None:
+            logger.debug("push_habit_schedule_to_google: no RRULE for habit %s, skipping", habit_id)
+            return
+
+        updated_rrule = _build_updated_rrule(existing_rrule, new_schedule_days)
+        if updated_rrule is None:
+            if "FREQ=WEEKLY" not in existing_rrule.upper():
+                logger.warning(
+                    "push_habit_schedule_to_google: unsupported RRULE '%s' for habit %s, skipping",
+                    existing_rrule,
+                    habit_id,
+                )
+            else:
+                logger.debug(
+                    "push_habit_schedule_to_google: no valid schedule days for habit %s, skipping",
+                    habit_id,
+                )
+            return
+
+        preserved_recurrence = [item for item in recurrence_items if not item.startswith("RRULE:")]
+        next_recurrence = [updated_rrule, *preserved_recurrence] if preserved_recurrence else [updated_rrule]
+        await _google_patch(access_token, calendar_id, master_id, {"recurrence": next_recurrence})
+
+        from app.services.calendar_google_service import sync_google_connection
+
+        try:
+            await sync_google_connection(db, connection, provider_account=provider_account)
+        except Exception:
+            logger.debug(
+                "push_habit_schedule_to_google: post-patch sync failed for habit %s",
+                habit_id,
+                exc_info=True,
+            )
+    except Exception:
+        logger.debug("push_habit_schedule_to_google: best-effort failed for habit %s", habit_id, exc_info=True)
