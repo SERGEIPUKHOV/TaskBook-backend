@@ -1,6 +1,79 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
+from sqlalchemy import select
+
+from app.core.database import AsyncSessionLocal
+from app.models.calendar_connection import CalendarConnection
+from app.models.calendar_event import CalendarEvent
+from app.models.planner_link import PlannerLink
+from app.models.user import User
 from tests.helpers import extract_data, register_and_auth
+
+
+async def seed_habit_calendar_link(
+    email: str,
+    *,
+    habit_id: str,
+    external_event_id: str,
+    starts_at: datetime,
+    ends_at: datetime,
+    is_all_day: bool = False,
+) -> None:
+    async with AsyncSessionLocal() as session:
+        user_result = await session.execute(select(User).where(User.email == email))
+        user = user_result.scalar_one()
+
+        conn_result = await session.execute(
+            select(CalendarConnection).where(
+                CalendarConnection.user_id == user.id,
+                CalendarConnection.provider == "google",
+                CalendarConnection.external_account_id == "primary",
+            )
+        )
+        connection = conn_result.scalar_one_or_none()
+        if connection is None:
+            connection = CalendarConnection(
+                user_id=user.id,
+                provider="google",
+                status="active",
+                external_account_id="primary",
+                account_label="Imported calendar",
+                color="#4285F4",
+            )
+            session.add(connection)
+            await session.flush()
+
+        event = CalendarEvent(
+            connection_id=connection.id,
+            user_id=user.id,
+            external_event_id=external_event_id,
+            external_calendar_id="primary",
+            title="Imported habit event",
+            description=None,
+            location=None,
+            starts_at=starts_at,
+            ends_at=ends_at,
+            source_timezone="UTC",
+            is_all_day=is_all_day,
+            status="confirmed",
+            raw_payload={},
+        )
+        session.add(event)
+        await session.flush()
+
+        session.add(
+            PlannerLink(
+                user_id=user.id,
+                source_kind="calendar_event",
+                source_ref=f"{connection.id}:{external_event_id}",
+                target_kind="habit",
+                target_id=habit_id,
+                link_mode="import_copy",
+            ),
+        )
+        await session.commit()
 
 
 async def test_habit_crud_grid_logs_and_ownership(client):
@@ -178,3 +251,60 @@ async def test_habit_validation_returns_422_for_invalid_month_and_blank_name(cli
     )
     assert invalid_delete_response.status_code == 422
     assert invalid_delete_response.json()["detail"] == "Invalid month"
+
+
+async def test_month_habits_include_linked_event_time_only_for_timed_imports(client):
+    email = "habit-linked-event-time@example.com"
+    headers, _ = await register_and_auth(client, email)
+
+    plain_response = await client.post(
+        "/api/v1/months/2026/3/habits",
+        json={"name": "No link"},
+        headers=headers,
+    )
+    assert plain_response.status_code == 201
+    plain_habit = extract_data(plain_response)
+
+    timed_response = await client.post(
+        "/api/v1/months/2026/3/habits",
+        json={"name": "Morning Run"},
+        headers=headers,
+    )
+    assert timed_response.status_code == 201
+    timed_habit = extract_data(timed_response)
+
+    all_day_response = await client.post(
+        "/api/v1/months/2026/3/habits",
+        json={"name": "Offsite"},
+        headers=headers,
+    )
+    assert all_day_response.status_code == 201
+    all_day_habit = extract_data(all_day_response)
+
+    await seed_habit_calendar_link(
+        email,
+        habit_id=timed_habit["id"],
+        external_event_id="habit-time-1",
+        starts_at=datetime(2026, 3, 10, 8, 0, tzinfo=timezone.utc),
+        ends_at=datetime(2026, 3, 10, 9, 0, tzinfo=timezone.utc),
+        is_all_day=False,
+    )
+    await seed_habit_calendar_link(
+        email,
+        habit_id=all_day_habit["id"],
+        external_event_id="habit-all-day-1",
+        starts_at=datetime(2026, 3, 12, 0, 0, tzinfo=timezone.utc),
+        ends_at=datetime(2026, 3, 13, 0, 0, tzinfo=timezone.utc),
+        is_all_day=True,
+    )
+
+    list_response = await client.get("/api/v1/months/2026/3/habits", headers=headers)
+    assert list_response.status_code == 200
+    habits = {habit["id"]: habit for habit in extract_data(list_response)}
+
+    assert habits[plain_habit["id"]]["linked_event_time"] is None
+    assert habits[timed_habit["id"]]["linked_event_time"] == {
+        "starts_at": "2026-03-10T08:00:00+00:00",
+        "ends_at": "2026-03-10T09:00:00+00:00",
+    }
+    assert habits[all_day_habit["id"]]["linked_event_time"] is None

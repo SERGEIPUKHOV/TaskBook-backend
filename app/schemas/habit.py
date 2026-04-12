@@ -36,11 +36,17 @@ class HabitPatch(BaseModel):
         return normalize_schedule_days(value)
 
 
+class LinkedEventTimeOut(BaseModel):
+    starts_at: str
+    ends_at: str
+
+
 class HabitOut(BaseModel):
     id: str
     name: str
     order: int
     schedule_days: list[ScheduleDay] = Field(default_factory=list)
+    linked_event_time: LinkedEventTimeOut | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

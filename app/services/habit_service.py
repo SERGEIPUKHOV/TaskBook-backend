@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 
 from fastapi import HTTPException, status
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.calendar_event import CalendarEvent
 from app.models.habit import Habit, HabitLog
 from app.models.planner_link import PlannerLink
-from app.schemas.habit import HabitGridOut, HabitOut, HabitPatch, normalize_schedule_days
+from app.schemas.habit import HabitGridOut, HabitOut, HabitPatch, LinkedEventTimeOut, normalize_schedule_days
 from app.services.cache_service import invalidate_dashboard
 from app.services.periods import days_in_month, month_key, validate_month
 
@@ -69,7 +70,78 @@ def _validated_month_key(year: int, month: int) -> str:
 async def list_month_habits(db: AsyncSession, user_id: str, year: int, month: int) -> list[HabitOut]:
     target_month_key = _validated_month_key(year, month)
     result = await db.execute(await _active_habit_query(user_id, target_month_key))
-    return [HabitOut.model_validate(item) for item in result.scalars().all()]
+    habits = result.scalars().all()
+    linked_times = await _fetch_linked_event_times(db, user_id, [str(habit.id) for habit in habits])
+    return [
+        HabitOut.model_validate(habit).model_copy(update={"linked_event_time": linked_times.get(str(habit.id))})
+        for habit in habits
+    ]
+
+
+def _utc_iso(dt: datetime) -> str:
+    """Return ISO-8601 string with +00:00 suffix, even for naive datetimes stored by SQLite."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
+async def _fetch_linked_event_times(
+    db: AsyncSession,
+    user_id: str,
+    habit_ids: list[str],
+) -> dict[str, LinkedEventTimeOut]:
+    """Batch resolve one timed linked event window per imported habit."""
+    if not habit_ids:
+        return {}
+
+    links_result = await db.execute(
+        select(PlannerLink).where(
+            PlannerLink.user_id == user_id,
+            PlannerLink.target_kind == "habit",
+            PlannerLink.target_id.in_(habit_ids),
+            PlannerLink.link_mode == "import_copy",
+            PlannerLink.source_kind == "calendar_event",
+        ),
+    )
+    links = links_result.scalars().all()
+    if not links:
+        return {}
+
+    ref_to_habit: dict[tuple[str, str], str] = {}
+    for link in links:
+        connection_id, separator, external_event_id = link.source_ref.partition(":")
+        if separator and connection_id and external_event_id:
+            ref_to_habit[(connection_id, external_event_id)] = str(link.target_id)
+
+    if not ref_to_habit:
+        return {}
+
+    event_filters = [
+        and_(CalendarEvent.connection_id == connection_id, CalendarEvent.external_event_id == external_event_id)
+        for connection_id, external_event_id in ref_to_habit
+    ]
+    events_result = await db.execute(
+        select(CalendarEvent)
+        .where(
+            CalendarEvent.user_id == user_id,
+            CalendarEvent.is_all_day.is_(False),
+            or_(*event_filters),
+        )
+        .order_by(CalendarEvent.starts_at.asc(), CalendarEvent.created_at.asc()),
+    )
+
+    result: dict[str, LinkedEventTimeOut] = {}
+    for event in events_result.scalars().all():
+        habit_id = ref_to_habit.get((str(event.connection_id), event.external_event_id))
+        if not habit_id or habit_id in result or event.starts_at is None or event.ends_at is None:
+            continue
+
+        result[habit_id] = LinkedEventTimeOut(
+            starts_at=_utc_iso(event.starts_at),
+            ends_at=_utc_iso(event.ends_at),
+        )
+
+    return result
 
 
 async def get_month_habit_grid(db: AsyncSession, user_id: str, year: int, month: int) -> HabitGridOut:
