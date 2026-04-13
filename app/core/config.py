@@ -37,8 +37,8 @@ class Settings(BaseSettings):
     GOOGLE_CALENDAR_CLIENT_SECRET: str | None = None
     GOOGLE_CALENDAR_REDIRECT_URI: str | None = None
     CALENDAR_SECRETS_KEY: str = "taskbook-calendar-dev-secret"
-    CALENDAR_SYNC_INTERVAL_SECONDS: int = 300
-    CALENDAR_SYNC_LOCK_TTL_SECONDS: int = 540
+    CALENDAR_SYNC_INTERVAL_SECONDS: int = 180
+    CALENDAR_SYNC_LOCK_TTL_SECONDS: int = 300
     CORS_ORIGINS: str = Field(
         default="http://localhost:3000,http://localhost:3001,http://localhost:3002,http://localhost:3003",
     )
