@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import HTTPException, status
 from sqlalchemy import and_, delete, func, or_, select
@@ -85,6 +86,28 @@ def _utc_iso(dt: datetime) -> str:
     return dt.isoformat()
 
 
+def _resolve_event_timezone(source_timezone: str | None):
+    if source_timezone:
+        try:
+            return ZoneInfo(source_timezone)
+        except ZoneInfoNotFoundError:
+            pass
+    return timezone.utc
+
+
+def _replace_wall_time_in_event_timezone(
+    value: datetime,
+    *,
+    hour: int,
+    minute: int,
+    source_timezone: str | None,
+) -> datetime:
+    base_value = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    event_timezone = _resolve_event_timezone(source_timezone)
+    localized_value = base_value.astimezone(event_timezone)
+    return localized_value.replace(hour=hour, minute=minute, second=0, microsecond=0).astimezone(timezone.utc)
+
+
 async def _fetch_linked_event_times(
     db: AsyncSession,
     user_id: str,
@@ -125,6 +148,7 @@ async def _fetch_linked_event_times(
         .where(
             CalendarEvent.user_id == user_id,
             CalendarEvent.is_all_day.is_(False),
+            CalendarEvent.status != "cancelled",
             or_(*event_filters),
         )
         .order_by(CalendarEvent.starts_at.asc(), CalendarEvent.created_at.asc()),
@@ -184,11 +208,18 @@ async def update_habit_event_time(
     start_h, start_m = (int(value) for value in starts_hhmm.split(":"))
     end_h, end_m = (int(value) for value in ends_hhmm.split(":"))
 
-    base_start = event.starts_at if event.starts_at.tzinfo is None else event.starts_at.replace(tzinfo=None)
-    base_end = event.ends_at if event.ends_at.tzinfo is None else event.ends_at.replace(tzinfo=None)
-
-    event.starts_at = base_start.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
-    event.ends_at = base_end.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
+    event.starts_at = _replace_wall_time_in_event_timezone(
+        event.starts_at,
+        hour=start_h,
+        minute=start_m,
+        source_timezone=event.source_timezone,
+    )
+    event.ends_at = _replace_wall_time_in_event_timezone(
+        event.ends_at,
+        hour=end_h,
+        minute=end_m,
+        source_timezone=event.source_timezone,
+    )
 
     await db.commit()
     await db.refresh(event)

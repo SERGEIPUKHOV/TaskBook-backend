@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+import re
 
 from sqlalchemy import and_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,6 +44,9 @@ class CalendarSyncError(RuntimeError):
     pass
 
 
+GOOGLE_INSTANCE_EVENT_ID_RE = re.compile(r"^(?P<master>.+)_(?:\d{8}T\d{6}Z|\d{8})$")
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -51,6 +56,145 @@ def ensure_utc(value: datetime) -> datetime:
         return value.replace(tzinfo=timezone.utc)
 
     return value.astimezone(timezone.utc)
+
+
+def derive_recurring_event_id(
+    raw_payload: dict[str, Any] | None,
+    external_event_id: str | None = None,
+) -> str | None:
+    if not raw_payload:
+        raw_recurring_id = None
+    else:
+        raw_recurring_id = raw_payload.get("recurringEventId")
+
+    if isinstance(raw_recurring_id, str) and raw_recurring_id:
+        return raw_recurring_id
+
+    if external_event_id:
+        match = GOOGLE_INSTANCE_EVENT_ID_RE.match(external_event_id)
+        if match:
+            return match.group("master")
+    return None
+
+
+def _resolve_event_zone(source_timezone: str | None):
+    if source_timezone:
+        try:
+            return ZoneInfo(source_timezone)
+        except ZoneInfoNotFoundError:
+            pass
+    return timezone.utc
+
+
+def _event_local_date(event: CalendarEvent) -> date:
+    starts_at = ensure_utc(event.starts_at)
+    return starts_at.astimezone(_resolve_event_zone(event.source_timezone)).date()
+
+
+def _pick_recurring_replacement(
+    stale_event: CalendarEvent,
+    candidates: list[CalendarEvent],
+) -> CalendarEvent | None:
+    if not candidates:
+        return None
+
+    stale_start = ensure_utc(stale_event.starts_at)
+    stale_local_date = _event_local_date(stale_event)
+    same_day_candidates = [
+        candidate
+        for candidate in candidates
+        if _event_local_date(candidate) == stale_local_date
+    ]
+    ranked_candidates = same_day_candidates or candidates
+
+    return min(
+        ranked_candidates,
+        key=lambda candidate: (
+            abs((ensure_utc(candidate.starts_at) - stale_start).total_seconds()),
+            ensure_utc(candidate.starts_at),
+            candidate.external_event_id,
+        ),
+    )
+
+
+async def rebind_cancelled_recurring_habit_links(
+    db: AsyncSession,
+    connection: CalendarConnection,
+) -> None:
+    links_result = await db.execute(
+        select(PlannerLink).where(
+            PlannerLink.user_id == connection.user_id,
+            PlannerLink.source_kind == CALENDAR_EVENT_SOURCE_KIND,
+            PlannerLink.link_mode == IMPORT_COPY_LINK_MODE,
+            PlannerLink.target_kind == "habit",
+            PlannerLink.source_ref.like(f"{connection.id}:%"),
+        ),
+    )
+    links = links_result.scalars().all()
+    if not links:
+        return
+
+    events_result = await db.execute(
+        select(CalendarEvent).where(
+            CalendarEvent.user_id == connection.user_id,
+            CalendarEvent.connection_id == connection.id,
+        ),
+    )
+    all_events = events_result.scalars().all()
+    if not all_events:
+        return
+
+    events_by_external_id = {
+        event.external_event_id: event
+        for event in all_events
+    }
+    active_events_by_recurring_id: dict[str, list[CalendarEvent]] = {}
+    for event in all_events:
+        if event.status == "cancelled":
+            continue
+        recurring_id = derive_recurring_event_id(event.raw_payload, event.external_event_id)
+        if not recurring_id:
+            continue
+        active_events_by_recurring_id.setdefault(recurring_id, []).append(event)
+
+    if not active_events_by_recurring_id:
+        return
+
+    links_by_ref = {link.source_ref: link for link in links}
+    for link in links:
+        _connection_id, separator, external_event_id = link.source_ref.partition(":")
+        if not separator or not external_event_id:
+            continue
+
+        stale_event = events_by_external_id.get(external_event_id)
+        if stale_event is None or stale_event.status != "cancelled":
+            continue
+
+        recurring_id = derive_recurring_event_id(stale_event.raw_payload, stale_event.external_event_id)
+        if not recurring_id:
+            continue
+
+        replacement = _pick_recurring_replacement(
+            stale_event,
+            active_events_by_recurring_id.get(recurring_id, []),
+        )
+        if replacement is None:
+            continue
+
+        new_source_ref = build_calendar_event_source_ref(connection.id, replacement.external_event_id)
+        if new_source_ref == link.source_ref:
+            continue
+
+        existing_link = links_by_ref.get(new_source_ref)
+        if existing_link is not None and existing_link.id != link.id:
+            if existing_link.target_kind == link.target_kind and existing_link.target_id == link.target_id:
+                await db.delete(link)
+                links_by_ref.pop(link.source_ref, None)
+            continue
+
+        links_by_ref.pop(link.source_ref, None)
+        link.source_ref = new_source_ref
+        links_by_ref[new_source_ref] = link
 
 
 def all_day_bounds(start_value: date, end_value: date | None = None) -> tuple[datetime, datetime]:
@@ -137,6 +281,8 @@ async def reconcile_connection_events(
         record.raw_payload = event.raw_payload
         record.last_seen_at = now
 
+    await db.flush()
+
     if full_sync:
         stale_update = (
             update(CalendarEvent)
@@ -146,6 +292,9 @@ async def reconcile_connection_events(
         if event_ids:
             stale_update = stale_update.where(CalendarEvent.external_event_id.not_in(event_ids))
         await db.execute(stale_update)
+
+    await db.flush()
+    await rebind_cancelled_recurring_habit_links(db, connection)
 
     connection.status = "active"
     connection.last_error = None
@@ -247,8 +396,8 @@ async def list_connection_events_in_range(
             if resolved_link is None:
                 continue
 
-            recurring_id = (linked_event.raw_payload or {}).get("recurringEventId")
-            if isinstance(recurring_id, str) and recurring_id:
+            recurring_id = derive_recurring_event_id(linked_event.raw_payload, linked_event.external_event_id)
+            if recurring_id:
                 starts = habit_starts.get(str(linked_link.target_id), "")
                 # Keep the earliest start month if multiple habits link to the same series.
                 current = linked_recurring_ids.get(recurring_id, "9999-99")
@@ -257,8 +406,7 @@ async def list_connection_events_in_range(
 
     events_out: list[CalendarEventOut] = []
     for event, connection in rows:
-        recurring_id_value = (event.raw_payload or {}).get("recurringEventId")
-        recurring_id = recurring_id_value if isinstance(recurring_id_value, str) and recurring_id_value else None
+        recurring_id = derive_recurring_event_id(event.raw_payload, event.external_event_id)
         event_month = (
             f"{event.starts_at.year:04d}-{event.starts_at.month:02d}"
             if event.starts_at else ""

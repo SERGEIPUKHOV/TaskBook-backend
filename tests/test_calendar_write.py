@@ -50,6 +50,7 @@ async def seed_calendar_import_link(
     external_account_id: str = "primary",
     external_event_id: str = "google-event-1",
     raw_payload: dict | None = None,
+    source_timezone: str = "UTC",
 ) -> dict[str, str]:
     async with AsyncSessionLocal() as session:
         user_result = await session.execute(select(User).where(User.email == email))
@@ -92,7 +93,7 @@ async def seed_calendar_import_link(
             location=None,
             starts_at=datetime(2026, 3, 10, 9, 0, tzinfo=timezone.utc),
             ends_at=datetime(2026, 3, 10, 10, 0, tzinfo=timezone.utc),
-            source_timezone="UTC",
+            source_timezone=source_timezone,
             is_all_day=False,
             status="confirmed",
             raw_payload=raw_payload or {},
@@ -420,6 +421,57 @@ async def test_push_habit_event_time_to_google_patches_master_event(client, monk
             {
                 "start": {"dateTime": "2026-03-10T10:30:00+00:00", "timeZone": "UTC"},
                 "end": {"dateTime": "2026-03-10T11:45:00+00:00", "timeZone": "UTC"},
+            },
+        ),
+    ]
+
+
+async def test_push_habit_event_time_to_google_preserves_master_timezone(client, monkeypatch):
+    email = "calendar-write-habit-time-tz@example.com"
+    headers, _ = await register_and_auth(client, email)
+    habit = await create_habit(client, headers)
+    await seed_calendar_import_link(
+        email,
+        target_kind="habit",
+        target_id=habit["id"],
+        provider="google",
+        external_account_id="primary",
+        external_event_id="google-habit-instance-time-tz",
+        raw_payload={"recurringEventId": "google-master-time-tz"},
+        source_timezone="Europe/Moscow",
+    )
+    patch_calls: list[tuple[str, str, str, dict]] = []
+
+    async def fake_ensure_google_access_token(_provider_account: CalendarProviderAccount) -> tuple[str, bool]:
+        return "google-access-token", False
+
+    async def fake_google_patch(access_token: str, calendar_id: str, event_id: str, body: dict) -> None:
+        patch_calls.append((access_token, calendar_id, event_id, body))
+
+    async def fake_fetch_google_event(access_token: str, calendar_id: str, event_id: str) -> dict:
+        return {
+            "start": {"dateTime": "2026-03-10T09:30:00+03:00", "timeZone": "Europe/Moscow"},
+            "end": {"dateTime": "2026-03-10T11:00:00+03:00", "timeZone": "Europe/Moscow"},
+        }
+
+    monkeypatch.setattr(
+        "app.services.calendar_write_service._ensure_google_access_token",
+        fake_ensure_google_access_token,
+    )
+    monkeypatch.setattr("app.services.calendar_write_service._google_patch", fake_google_patch)
+    monkeypatch.setattr(_cws, "_fetch_google_event", fake_fetch_google_event)
+
+    async with AsyncSessionLocal() as session:
+        await push_habit_event_time_to_google(session, await get_user_id(email), habit["id"], "10:30", "11:45")
+
+    assert patch_calls == [
+        (
+            "google-access-token",
+            "primary",
+            "google-master-time-tz",
+            {
+                "start": {"dateTime": "2026-03-10T10:30:00+03:00", "timeZone": "Europe/Moscow"},
+                "end": {"dateTime": "2026-03-10T11:45:00+03:00", "timeZone": "Europe/Moscow"},
             },
         ),
     ]

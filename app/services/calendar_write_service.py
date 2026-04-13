@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 from typing import Any
 from urllib.parse import quote
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from sqlalchemy import select
@@ -21,6 +22,35 @@ logger = logging.getLogger(__name__)
 GOOGLE_API_BASE = "https://www.googleapis.com/calendar/v3"
 ISO_DAY_TO_BYDAY = {1: "MO", 2: "TU", 3: "WE", 4: "TH", 5: "FR", 6: "SA", 7: "SU"}
 BYDAY_TO_ISO_DAY = {v: k for k, v in ISO_DAY_TO_BYDAY.items()}
+
+
+def _resolve_google_event_timezone(
+    source_timezone: str | None,
+    fallback_tzinfo: tzinfo | None,
+) -> tuple[tzinfo, str | None]:
+    if source_timezone:
+        try:
+            return ZoneInfo(source_timezone), source_timezone
+        except ZoneInfoNotFoundError:
+            pass
+
+    if fallback_tzinfo is not None:
+        return fallback_tzinfo, "UTC" if fallback_tzinfo == timezone.utc else None
+
+    return timezone.utc, "UTC"
+
+
+def _replace_google_wall_time(
+    value: datetime,
+    *,
+    hour: int,
+    minute: int,
+    source_timezone: str | None,
+) -> tuple[datetime, str | None]:
+    base_value = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    target_timezone, google_timezone_name = _resolve_google_event_timezone(source_timezone, base_value.tzinfo)
+    localized_value = base_value.astimezone(target_timezone)
+    return localized_value.replace(hour=hour, minute=minute, second=0, microsecond=0), google_timezone_name
 
 
 async def _google_patch(
@@ -274,7 +304,7 @@ async def push_habit_event_time_to_google(
     starts_hhmm: str,
     ends_hhmm: str,
 ) -> None:
-    """Best-effort: update Google event start/end time (HH:MM UTC).
+    """Best-effort: update Google event start/end time using event-local wall clock HH:MM.
 
     For recurring events: fetches the master event to use its own original date,
     then patches the master so all instances update via next sync.
@@ -311,6 +341,8 @@ async def push_habit_event_time_to_google(
 
             master_start_str = (master_data.get("start") or {}).get("dateTime")
             master_end_str = (master_data.get("end") or {}).get("dateTime")
+            master_start_timezone = (master_data.get("start") or {}).get("timeZone")
+            master_end_timezone = (master_data.get("end") or {}).get("timeZone")
             if not master_start_str or not master_end_str:
                 return
 
@@ -320,22 +352,41 @@ async def push_habit_event_time_to_google(
                 base_start = base_start.replace(tzinfo=timezone.utc)
             if base_end.tzinfo is None:
                 base_end = base_end.replace(tzinfo=timezone.utc)
+            target_timezone = master_start_timezone or master_end_timezone or event.source_timezone
             target_id = recurring_event_id
         else:
             base_start = event.starts_at if event.starts_at.tzinfo is not None else event.starts_at.replace(tzinfo=timezone.utc)
             base_end = event.ends_at if event.ends_at.tzinfo is not None else event.ends_at.replace(tzinfo=timezone.utc)
+            target_timezone = event.source_timezone
             target_id = event.external_event_id
 
-        new_start = base_start.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
-        new_end = base_end.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
+        new_start, start_timezone_name = _replace_google_wall_time(
+            base_start,
+            hour=start_h,
+            minute=start_m,
+            source_timezone=target_timezone,
+        )
+        new_end, end_timezone_name = _replace_google_wall_time(
+            base_end,
+            hour=end_h,
+            minute=end_m,
+            source_timezone=target_timezone,
+        )
+
+        start_payload = {"dateTime": new_start.isoformat()}
+        end_payload = {"dateTime": new_end.isoformat()}
+        if start_timezone_name:
+            start_payload["timeZone"] = start_timezone_name
+        if end_timezone_name:
+            end_payload["timeZone"] = end_timezone_name
 
         await _google_patch(
             access_token,
             calendar_id,
             target_id,
             {
-                "start": {"dateTime": new_start.isoformat(), "timeZone": "UTC"},
-                "end": {"dateTime": new_end.isoformat(), "timeZone": "UTC"},
+                "start": start_payload,
+                "end": end_payload,
             },
         )
     except Exception:

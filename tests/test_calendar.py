@@ -3,18 +3,20 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
 
+import httpx
 from sqlalchemy import select
 
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.models.calendar_connection import CalendarConnection
 from app.models.calendar_event import CalendarEvent
+from app.models.calendar_provider_account import CalendarProviderAccount
 from app.models.habit import Habit
 from app.models.planner_link import PlannerLink
 from app.models.user import User
 from app.services.calendar_ics_service import sync_all_apple_connections
-from app.services.calendar_google_service import store_google_tokens
-from app.services.calendar_sync_service import NormalizedCalendarEvent
+from app.services.calendar_google_service import _google_get, store_google_tokens
+from app.services.calendar_sync_service import NormalizedCalendarEvent, reconcile_connection_events
 from tests.helpers import extract_data, register_and_auth
 
 ICS_PAYLOAD = """BEGIN:VCALENDAR
@@ -395,6 +397,75 @@ async def test_calendar_google_multiselect_selection_sync_and_disconnect(client,
     }
 
 
+async def test_google_get_retries_transient_transport_errors(monkeypatch):
+    attempts = 0
+
+    async def fake_sleep(_seconds: float):
+        return None
+
+    async def fake_request(self, method: str, url: str, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise httpx.ConnectError("dns temporary failure", request=httpx.Request(method, url))
+        return httpx.Response(200, json={"items": []}, request=httpx.Request(method, url))
+
+    monkeypatch.setattr("app.services.calendar_google_service.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr(httpx.AsyncClient, "request", fake_request)
+
+    payload = await _google_get("google-access-token", "/users/me/calendarList")
+    assert payload == {"items": []}
+    assert attempts == 3
+
+
+async def test_calendar_google_sync_all_surfaces_transient_network_error_without_500(client, monkeypatch):
+    email = "calendar-google-network@example.com"
+    headers, _ = await register_and_auth(client, email)
+    await seed_google_provider_account(email)
+
+    async with AsyncSessionLocal() as session:
+        user = (await session.execute(select(User).where(User.email == email))).scalar_one()
+        provider_account = (
+            await session.execute(
+                select(CalendarProviderAccount).where(
+                    CalendarProviderAccount.user_id == user.id,
+                    CalendarProviderAccount.provider == "google",
+                )
+            )
+        ).scalar_one()
+        connection = CalendarConnection(
+            user_id=user.id,
+            provider_account_id=provider_account.id,
+            provider="google",
+            status="active",
+            external_account_id="primary",
+            account_label="Primary",
+        )
+        session.add(connection)
+        await session.commit()
+
+    async def fake_sleep(_seconds: float):
+        return None
+
+    original_request = httpx.AsyncClient.request
+
+    async def fake_request(self, method: str, url: str, **kwargs):
+        if "googleapis.com" not in str(url) and "accounts.google.com" not in str(url):
+            return await original_request(self, method, url, **kwargs)
+        raise httpx.ConnectError("dns temporary failure", request=httpx.Request(method, url))
+
+    monkeypatch.setattr("app.services.calendar_google_service.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr(httpx.AsyncClient, "request", fake_request)
+
+    response = await client.post("/api/v1/calendar/google/sync-all", headers=headers)
+    assert response.status_code == 200
+    payload = extract_data(response)
+    assert len(payload) == 1
+    assert payload[0]["status"] == "error"
+    assert "temporarily unavailable" in payload[0]["last_error"]
+    assert "dns temporary failure" in payload[0]["last_error"]
+
+
 async def test_sync_all_apple_connections_returns_empty_list_for_empty_db():
     async with AsyncSessionLocal() as session:
         assert await sync_all_apple_connections(session) == []
@@ -616,6 +687,94 @@ async def test_calendar_events_mark_future_instances_of_linked_recurring_series(
     assert future_event["planner_link"] is None
     assert future_event["series_linked"] is True
     assert one_off_event["series_linked"] is False
+
+
+async def test_google_recurring_time_shift_rebinds_habit_link_to_new_instance(client):
+    email = "calendar-linked-series-time-shift@example.com"
+    headers, _ = await register_and_auth(client, email)
+    original_event_id = await seed_manual_calendar_event(
+        email,
+        title="Баня",
+        external_event_id="habit-series-old-instance",
+        raw_payload={"recurringEventId": "habit-series-master-1"},
+        starts_at=datetime(2026, 4, 18, 6, 30, tzinfo=timezone.utc),
+        ends_at=datetime(2026, 4, 18, 8, 0, tzinfo=timezone.utc),
+    )
+
+    import_response = await client.post(
+        f"/api/v1/calendar/events/{original_event_id}/import",
+        json={
+            "target_type": "habit",
+            "title": "Баня",
+            "year": 2026,
+            "month": 4,
+        },
+        headers=headers,
+    )
+    assert import_response.status_code == 200
+    imported_link = extract_data(import_response)["planner_link"]
+
+    async with AsyncSessionLocal() as session:
+        event_result = await session.execute(select(CalendarEvent).where(CalendarEvent.id == original_event_id))
+        original_event = event_result.scalar_one()
+        connection_result = await session.execute(
+            select(CalendarConnection).where(CalendarConnection.id == original_event.connection_id)
+        )
+        connection = connection_result.scalar_one()
+
+        await reconcile_connection_events(
+            session,
+            connection,
+            [
+                NormalizedCalendarEvent(
+                    external_event_id="habit-series-new-instance",
+                    external_calendar_id="primary",
+                    title="Баня",
+                    description=None,
+                    location=None,
+                    starts_at=datetime(2026, 4, 18, 7, 30, tzinfo=timezone.utc),
+                    ends_at=datetime(2026, 4, 18, 9, 0, tzinfo=timezone.utc),
+                    source_timezone="Europe/Moscow",
+                    is_all_day=False,
+                    status="confirmed",
+                    raw_payload={
+                        "id": "habit-series-new-instance",
+                        "recurringEventId": "habit-series-master-1",
+                    },
+                )
+            ],
+            full_sync=True,
+            sync_cursor="sync-shift-1",
+        )
+
+    events_response = await client.get(
+        "/api/v1/calendar/events?date_from=2026-04-13&date_to=2026-04-19",
+        headers=headers,
+    )
+    assert events_response.status_code == 200
+    events = extract_data(events_response)["events"]
+    shifted_event = next(event for event in events if event["external_event_id"] == "habit-series-new-instance")
+    assert shifted_event["planner_link"] == imported_link
+
+    habits_response = await client.get("/api/v1/months/2026/4/habits", headers=headers)
+    assert habits_response.status_code == 200
+    habit = next(item for item in extract_data(habits_response) if item["id"] == imported_link["target_id"])
+    assert habit["linked_event_time"] == {
+        "starts_at": "2026-04-18T07:30:00+00:00",
+        "ends_at": "2026-04-18T09:00:00+00:00",
+    }
+
+    async with AsyncSessionLocal() as session:
+        link_result = await session.execute(
+            select(PlannerLink).where(
+                PlannerLink.target_kind == "habit",
+                PlannerLink.target_id == imported_link["target_id"],
+                PlannerLink.source_kind == "calendar_event",
+                PlannerLink.link_mode == "import_copy",
+            )
+        )
+        re_bound_link = link_result.scalar_one()
+        assert re_bound_link.source_ref.endswith(":habit-series-new-instance")
 
 
 async def test_calendar_event_unlocks_after_imported_task_is_deleted(client):

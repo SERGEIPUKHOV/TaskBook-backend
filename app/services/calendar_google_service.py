@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import re
@@ -30,6 +31,8 @@ GOOGLE_API_BASE = "https://www.googleapis.com/calendar/v3"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 FULL_SYNC_PAST_DAYS = 30
 FULL_SYNC_FUTURE_DAYS = 180
+GOOGLE_REQUEST_RETRY_DELAYS = (0.5, 1.0)
+GOOGLE_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
 class InvalidGoogleSyncCursor(CalendarSyncError):
@@ -54,7 +57,7 @@ def _validate_hex_color(value: str | None) -> str | None:
 
 async def _google_post_token(data: dict[str, str]) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=20) as client:
-        response = await client.post(GOOGLE_TOKEN_URL, data=data)
+        response = await _google_request(client, "POST", GOOGLE_TOKEN_URL, data=data)
 
     if response.status_code >= 400:
         raise CalendarSyncError(response.text or "Google token exchange failed")
@@ -85,9 +88,40 @@ async def refresh_google_access_token(refresh_token: str) -> dict[str, Any]:
     )
 
 
+async def _google_request(
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    **kwargs: Any,
+) -> httpx.Response:
+    last_error: httpx.HTTPError | None = None
+
+    for attempt in range(len(GOOGLE_REQUEST_RETRY_DELAYS) + 1):
+        try:
+            response = await client.request(method, url, **kwargs)
+        except (httpx.TimeoutException, httpx.TransportError) as error:
+            last_error = error
+            if attempt >= len(GOOGLE_REQUEST_RETRY_DELAYS):
+                break
+
+            await asyncio.sleep(GOOGLE_REQUEST_RETRY_DELAYS[attempt])
+            continue
+
+        if response.status_code in GOOGLE_RETRYABLE_STATUS_CODES and attempt < len(GOOGLE_REQUEST_RETRY_DELAYS):
+            await asyncio.sleep(GOOGLE_REQUEST_RETRY_DELAYS[attempt])
+            continue
+
+        return response
+
+    detail = str(last_error) if last_error else "Google API request failed"
+    raise CalendarSyncError(f"Google API temporarily unavailable: {detail}")
+
+
 async def _google_get(access_token: str, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=20) as client:
-        response = await client.get(
+        response = await _google_request(
+            client,
+            "GET",
             f"{GOOGLE_API_BASE}{path}",
             params=params,
             headers={"Authorization": f"Bearer {access_token}"},

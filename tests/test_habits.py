@@ -19,6 +19,7 @@ async def seed_habit_calendar_link(
     external_event_id: str,
     starts_at: datetime,
     ends_at: datetime,
+    source_timezone: str = "UTC",
     is_all_day: bool = False,
 ) -> None:
     async with AsyncSessionLocal() as session:
@@ -55,7 +56,7 @@ async def seed_habit_calendar_link(
             location=None,
             starts_at=starts_at,
             ends_at=ends_at,
-            source_timezone="UTC",
+            source_timezone=source_timezone,
             is_all_day=is_all_day,
             status="confirmed",
             raw_payload={},
@@ -348,4 +349,38 @@ async def test_patch_habit_event_time(client):
     assert patch_response.json()["data"] == {
         "starts_at": "2026-03-10T10:30:00+00:00",
         "ends_at": "2026-03-10T11:45:00+00:00",
+    }
+
+
+async def test_patch_habit_event_time_respects_event_timezone(client):
+    email = "habit-event-time-timezone@example.com"
+    headers, _ = await register_and_auth(client, email)
+
+    habit_response = await client.post(
+        "/api/v1/months/2026/3/habits",
+        json={"name": "Timezone aware habit"},
+        headers=headers,
+    )
+    assert habit_response.status_code == 201
+    habit = extract_data(habit_response)
+
+    await seed_habit_calendar_link(
+        email,
+        habit_id=habit["id"],
+        external_event_id="event-time-tz-1",
+        starts_at=datetime(2026, 3, 10, 8, 0, tzinfo=timezone.utc),
+        ends_at=datetime(2026, 3, 10, 9, 0, tzinfo=timezone.utc),
+        source_timezone="Europe/Moscow",
+        is_all_day=False,
+    )
+
+    patch_response = await client.patch(
+        f"/api/v1/habits/{habit['id']}/event-time",
+        json={"starts_at": "10:30", "ends_at": "11:45"},
+        headers=headers,
+    )
+    assert patch_response.status_code == 200
+    assert patch_response.json()["data"] == {
+        "starts_at": "2026-03-10T07:30:00+00:00",
+        "ends_at": "2026-03-10T08:45:00+00:00",
     }
