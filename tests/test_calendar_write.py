@@ -13,11 +13,16 @@ from app.models.user import User
 import app.services.calendar_write_service as _cws
 from app.services.calendar_write_service import (
     _build_updated_rrule,
+    backpropagate_google_changes_to_tasks,
     push_habit_event_time_to_google,
     push_habit_schedule_to_google,
     push_habit_title_to_google,
+    push_task_event_time_to_google,
     push_task_title_to_google,
+    push_task_to_google,
+    unlink_task_from_google,
 )
+from app.services.calendar_sync_service import CalendarSyncError, NormalizedCalendarEvent
 from tests.helpers import extract_data, register_and_auth
 
 
@@ -664,3 +669,325 @@ async def test_patch_habit_event_time_route_stays_200_when_writeback_fails(clien
 
     assert response.status_code == 200
     assert response.json()["data"] is None
+
+
+# ── push_task_to_google ────────────────────────────────────────────────────────
+
+async def test_push_task_to_google_creates_event_and_planner_link(client, monkeypatch):
+    email = "cw-task-export-ok@example.com"
+    headers, _ = await register_and_auth(client, email)
+    task = await create_task(client, headers, "Export me")
+
+    link_meta = await seed_calendar_import_link(
+        email,
+        target_kind="task",
+        target_id="__seed_only__",  # unrelated link, won't affect task
+        provider="google",
+        external_account_id="primary",
+        external_event_id="unrelated-event",
+    )
+    connection_id = link_meta["connection_id"]
+    user_id = link_meta["user_id"]
+
+    post_calls: list[dict] = []
+
+    async def fake_ensure_google_access_token(_pa) -> tuple[str, bool]:
+        return "tok", False
+
+    async def fake_google_post_event(_token, _cal_id, body: dict) -> dict:
+        post_calls.append(body)
+        return {"id": "new-google-event-123"}
+
+    import app.services.calendar_write_service as _cws2
+    monkeypatch.setattr("app.services.calendar_write_service._ensure_google_access_token", fake_ensure_google_access_token)
+    monkeypatch.setattr(_cws2, "_google_post_event", fake_google_post_event)
+
+    async with AsyncSessionLocal() as session:
+        ext_id = await push_task_to_google(session, str(user_id), task["id"], str(connection_id))
+
+    assert ext_id == "new-google-event-123"
+    assert len(post_calls) == 1
+    assert post_calls[0]["summary"] == "Export me"
+
+    async with AsyncSessionLocal() as session:
+        link_result = await session.execute(
+            select(PlannerLink).where(
+                PlannerLink.target_id == task["id"],
+                PlannerLink.target_kind == "task",
+                PlannerLink.link_mode == "export_copy",
+            )
+        )
+        link = link_result.scalar_one_or_none()
+    assert link is not None
+    assert f":{ext_id}" in link.source_ref
+
+
+async def test_push_task_to_google_raises_when_connection_missing(client, monkeypatch):
+    email = "cw-task-export-no-conn@example.com"
+    headers, _ = await register_and_auth(client, email)
+    task = await create_task(client, headers)
+    user_id = await get_user_id(email)
+
+    async with AsyncSessionLocal() as session:
+        try:
+            await push_task_to_google(session, user_id, task["id"], "nonexistent-connection-id")
+            assert False, "should have raised"
+        except CalendarSyncError:
+            pass
+
+
+async def test_push_task_to_google_removes_existing_link_before_creating(client, monkeypatch):
+    email = "cw-task-export-relink@example.com"
+    headers, _ = await register_and_auth(client, email)
+    task = await create_task(client, headers, "Relink task")
+
+    link_meta = await seed_calendar_import_link(
+        email,
+        target_kind="task",
+        target_id=task["id"],
+        provider="google",
+        external_account_id="primary",
+        external_event_id="old-google-event",
+    )
+    connection_id = link_meta["connection_id"]
+    user_id = link_meta["user_id"]
+
+    async def fake_ensure_google_access_token(_pa) -> tuple[str, bool]:
+        return "tok", False
+
+    async def fake_google_post_event(_token, _cal_id, _body) -> dict:
+        return {"id": "new-google-event-relink"}
+
+    import app.services.calendar_write_service as _cws2
+    monkeypatch.setattr("app.services.calendar_write_service._ensure_google_access_token", fake_ensure_google_access_token)
+    monkeypatch.setattr(_cws2, "_google_post_event", fake_google_post_event)
+
+    async with AsyncSessionLocal() as session:
+        await push_task_to_google(session, str(user_id), task["id"], str(connection_id))
+
+    async with AsyncSessionLocal() as session:
+        links_result = await session.execute(
+            select(PlannerLink).where(
+                PlannerLink.target_id == task["id"],
+                PlannerLink.target_kind == "task",
+            )
+        )
+        links = links_result.scalars().all()
+    assert len(links) == 1
+    assert links[0].link_mode == "export_copy"
+    assert "new-google-event-relink" in links[0].source_ref
+
+
+# ── unlink_task_from_google ───────────────────────────────────────────────────
+
+async def test_unlink_task_from_google_removes_link_keeps_event(client):
+    email = "cw-task-unlink@example.com"
+    headers, _ = await register_and_auth(client, email)
+    task = await create_task(client, headers, "Unlink me")
+
+    link_meta = await seed_calendar_import_link(
+        email,
+        target_kind="task",
+        target_id=task["id"],
+        provider="google",
+        external_account_id="primary",
+        external_event_id="google-unlink-event",
+    )
+    user_id = link_meta["user_id"]
+    event_id = link_meta["event_id"]
+
+    async with AsyncSessionLocal() as session:
+        await unlink_task_from_google(session, str(user_id), task["id"])
+
+    async with AsyncSessionLocal() as session:
+        link_result = await session.execute(
+            select(PlannerLink).where(PlannerLink.target_id == task["id"])
+        )
+        assert link_result.scalar_one_or_none() is None
+
+        event_result = await session.execute(
+            select(CalendarEvent).where(CalendarEvent.id == event_id)
+        )
+        assert event_result.scalar_one_or_none() is not None
+
+
+async def test_unlink_task_from_google_noop_when_no_link(client):
+    email = "cw-task-unlink-noop@example.com"
+    headers, _ = await register_and_auth(client, email)
+    task = await create_task(client, headers)
+    user_id = await get_user_id(email)
+
+    async with AsyncSessionLocal() as session:
+        await unlink_task_from_google(session, user_id, task["id"])
+
+
+# ── push_task_event_time_to_google ────────────────────────────────────────────
+
+async def test_push_task_event_time_to_google_patches_linked_event(client, monkeypatch):
+    email = "cw-task-event-time@example.com"
+    headers, _ = await register_and_auth(client, email)
+    task = await create_task(client, headers, "Timed task")
+
+    await seed_calendar_import_link(
+        email,
+        target_kind="task",
+        target_id=task["id"],
+        provider="google",
+        external_account_id="primary",
+        external_event_id="google-task-time-1",
+    )
+    user_id = await get_user_id(email)
+    patch_calls: list[tuple] = []
+
+    async def fake_ensure_google_access_token(_pa) -> tuple[str, bool]:
+        return "tok", False
+
+    async def fake_google_patch(token, cal_id, event_id, body) -> None:
+        patch_calls.append((token, cal_id, event_id, body))
+
+    monkeypatch.setattr("app.services.calendar_write_service._ensure_google_access_token", fake_ensure_google_access_token)
+    monkeypatch.setattr("app.services.calendar_write_service._google_patch", fake_google_patch)
+
+    async with AsyncSessionLocal() as session:
+        await push_task_event_time_to_google(session, user_id, task["id"], "10:00", "11:30")
+
+    assert len(patch_calls) == 1
+    body = patch_calls[0][3]
+    assert "start" in body and "end" in body
+
+
+async def test_push_task_event_time_to_google_noop_when_no_link(client, monkeypatch):
+    email = "cw-task-event-time-noop@example.com"
+    headers, _ = await register_and_auth(client, email)
+    task = await create_task(client, headers)
+    user_id = await get_user_id(email)
+    patch_calls: list = []
+
+    async def fake_google_patch(*_args, **_kwargs) -> None:
+        patch_calls.append(True)
+
+    monkeypatch.setattr("app.services.calendar_write_service._google_patch", fake_google_patch)
+
+    async with AsyncSessionLocal() as session:
+        await push_task_event_time_to_google(session, user_id, task["id"], "10:00", "11:00")
+
+    assert patch_calls == []
+
+
+# ── backpropagate_google_changes_to_tasks ─────────────────────────────────────
+
+async def _make_normalized_event(
+    external_event_id: str,
+    title: str,
+    status: str = "confirmed",
+    starts_at: datetime | None = None,
+) -> NormalizedCalendarEvent:
+    return NormalizedCalendarEvent(
+        external_event_id=external_event_id,
+        external_calendar_id="primary",
+        title=title,
+        description=None,
+        location=None,
+        starts_at=starts_at or datetime(2026, 3, 9, 9, 0, tzinfo=timezone.utc),
+        ends_at=starts_at or datetime(2026, 3, 9, 10, 0, tzinfo=timezone.utc),
+        source_timezone="UTC",
+        is_all_day=False,
+        status=status,
+        raw_payload={},
+    )
+
+
+async def test_backpropagate_renames_task_when_google_event_title_changes(client):
+    email = "cw-backprop-rename@example.com"
+    headers, _ = await register_and_auth(client, email)
+    task = await create_task(client, headers, "Old title")
+
+    link_meta = await seed_calendar_import_link(
+        email,
+        target_kind="task",
+        target_id=task["id"],
+        provider="google",
+        external_account_id="primary",
+        external_event_id="google-backprop-rename",
+    )
+    connection_id = str(link_meta["connection_id"])
+    user_id = str(link_meta["user_id"])
+
+    events = [await _make_normalized_event("google-backprop-rename", "New title from Google")]
+
+    async with AsyncSessionLocal() as session:
+        await backpropagate_google_changes_to_tasks(session, connection_id, user_id, events)
+
+    response = await client.get(f"/api/v1/weeks/2026/11/tasks", headers=headers)
+    tasks = response.json()["data"]
+    task_data = next(t for t in tasks if t["id"] == task["id"])
+    assert task_data["title"] == "New title from Google"
+
+
+async def test_backpropagate_removes_link_when_event_cancelled(client):
+    email = "cw-backprop-cancel@example.com"
+    headers, _ = await register_and_auth(client, email)
+    task = await create_task(client, headers, "Linked task")
+
+    link_meta = await seed_calendar_import_link(
+        email,
+        target_kind="task",
+        target_id=task["id"],
+        provider="google",
+        external_account_id="primary",
+        external_event_id="google-backprop-cancel",
+    )
+    connection_id = str(link_meta["connection_id"])
+    user_id = str(link_meta["user_id"])
+
+    events = [await _make_normalized_event("google-backprop-cancel", "Cancelled event", status="cancelled")]
+
+    async with AsyncSessionLocal() as session:
+        await backpropagate_google_changes_to_tasks(session, connection_id, user_id, events)
+
+    async with AsyncSessionLocal() as session:
+        link_result = await session.execute(
+            select(PlannerLink).where(PlannerLink.target_id == task["id"])
+        )
+        assert link_result.scalar_one_or_none() is None
+
+
+async def test_backpropagate_updates_start_day_when_date_changes(client):
+    email = "cw-backprop-date@example.com"
+    headers, _ = await register_and_auth(client, email)
+    task = await create_task(client, headers, "Moved task")
+
+    link_meta = await seed_calendar_import_link(
+        email,
+        target_kind="task",
+        target_id=task["id"],
+        provider="google",
+        external_account_id="primary",
+        external_event_id="google-backprop-date",
+    )
+    connection_id = str(link_meta["connection_id"])
+    user_id = str(link_meta["user_id"])
+
+    # Week 11 of 2026: Mon 2026-03-09 .. Sun 2026-03-15
+    # Move event to Wednesday 2026-03-11 → start_day = 3
+    new_starts_at = datetime(2026, 3, 11, 9, 0, tzinfo=timezone.utc)
+    events = [await _make_normalized_event("google-backprop-date", "Moved task", starts_at=new_starts_at)]
+
+    async with AsyncSessionLocal() as session:
+        await backpropagate_google_changes_to_tasks(session, connection_id, user_id, events)
+
+    response = await client.get("/api/v1/weeks/2026/11/tasks", headers=headers)
+    tasks = response.json()["data"]
+    task_data = next(t for t in tasks if t["id"] == task["id"])
+    assert task_data["start_day"] == 3
+
+
+async def test_backpropagate_noop_when_no_task_links(client):
+    email = "cw-backprop-noop@example.com"
+    await register_and_auth(client, email)
+    user_id = await get_user_id(email)
+
+    events = [await _make_normalized_event("google-no-link", "Some event")]
+
+    async with AsyncSessionLocal() as session:
+        await backpropagate_google_changes_to_tasks(session, "fake-connection-id", user_id, events)

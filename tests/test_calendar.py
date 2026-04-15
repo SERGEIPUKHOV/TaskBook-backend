@@ -1087,3 +1087,235 @@ async def test_calendar_sync_worker_counts_google_and_apple_connections(monkeypa
     from app.workers.calendar_sync_worker import run_sync_cycle
 
     assert await run_sync_cycle() == 3
+
+
+# ── Task calendar export endpoints ────────────────────────────────────────────
+
+async def _seed_google_connection_for_task_export(email: str) -> str:
+    """Create a Google CalendarConnection with provider_account and return connection_id."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(User).where(User.email == email))
+        user = result.scalar_one()
+
+        provider_account = CalendarProviderAccount(
+            user_id=user.id,
+            provider="google",
+            status="active",
+            external_account_id="primary",
+            account_label="Google Account",
+            access_token_encrypted="tok",
+            refresh_token_encrypted="ref",
+        )
+        session.add(provider_account)
+        await session.flush()
+
+        connection = CalendarConnection(
+            user_id=user.id,
+            provider_account_id=provider_account.id,
+            provider="google",
+            status="active",
+            external_account_id="primary",
+            account_label="Primary",
+            color="#4285F4",
+        )
+        session.add(connection)
+        await session.commit()
+        return str(connection.id)
+
+
+async def _create_task_via_api(client, headers, title: str = "Task") -> dict:
+    response = await client.post(
+        "/api/v1/weeks/2026/11/tasks",
+        json={"title": title, "start_day": 1},
+        headers=headers,
+    )
+    assert response.status_code == 201
+    return extract_data(response)
+
+
+async def test_post_calendar_export_creates_google_event_and_link(client, monkeypatch):
+    email = "cal-task-export-endpoint@example.com"
+    headers, _ = await register_and_auth(client, email)
+    task = await _create_task_via_api(client, headers, "Export endpoint task")
+    connection_id = await _seed_google_connection_for_task_export(email)
+
+    async def fake_ensure_google_access_token(_pa) -> tuple[str, bool]:
+        return "tok", False
+
+    async def fake_google_post_event(_token, _cal_id, _body) -> dict:
+        return {"id": "endpoint-google-event-1"}
+
+    import app.services.calendar_write_service as _cws
+    monkeypatch.setattr("app.services.calendar_write_service._ensure_google_access_token", fake_ensure_google_access_token)
+    monkeypatch.setattr(_cws, "_google_post_event", fake_google_post_event)
+
+    response = await client.post(
+        f"/api/v1/tasks/{task['id']}/calendar-export",
+        json={"connection_id": connection_id},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    data = extract_data(response)
+    assert data["external_event_id"] == "endpoint-google-event-1"
+
+    async with AsyncSessionLocal() as session:
+        link_result = await session.execute(
+            select(PlannerLink).where(
+                PlannerLink.target_id == task["id"],
+                PlannerLink.link_mode == "export_copy",
+            )
+        )
+        assert link_result.scalar_one_or_none() is not None
+
+
+async def test_post_calendar_export_returns_422_when_connection_missing(client, monkeypatch):
+    email = "cal-task-export-no-conn@example.com"
+    headers, _ = await register_and_auth(client, email)
+    task = await _create_task_via_api(client, headers)
+
+    response = await client.post(
+        f"/api/v1/tasks/{task['id']}/calendar-export",
+        json={"connection_id": "00000000-0000-0000-0000-000000000000"},
+        headers=headers,
+    )
+    assert response.status_code == 422
+
+
+async def test_delete_calendar_export_removes_link(client):
+    email = "cal-task-unlink-endpoint@example.com"
+    headers, _ = await register_and_auth(client, email)
+    task = await _create_task_via_api(client, headers, "Linked task")
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(User).where(User.email == email))
+        user = result.scalar_one()
+        connection = CalendarConnection(
+            user_id=user.id,
+            provider="google",
+            status="active",
+            external_account_id="primary",
+            account_label="Google",
+            color="#4285F4",
+        )
+        session.add(connection)
+        await session.flush()
+
+        event = CalendarEvent(
+            connection_id=connection.id,
+            user_id=user.id,
+            external_event_id="google-unlink-endpoint-event",
+            external_calendar_id="primary",
+            title="Linked",
+            description=None,
+            location=None,
+            starts_at=datetime(2026, 3, 9, 9, 0, tzinfo=timezone.utc),
+            ends_at=datetime(2026, 3, 9, 10, 0, tzinfo=timezone.utc),
+            source_timezone="UTC",
+            is_all_day=False,
+            status="confirmed",
+            raw_payload={},
+        )
+        session.add(event)
+        await session.flush()
+
+        session.add(PlannerLink(
+            user_id=user.id,
+            source_kind="calendar_event",
+            source_ref=f"{connection.id}:google-unlink-endpoint-event",
+            target_kind="task",
+            target_id=task["id"],
+            link_mode="export_copy",
+        ))
+        await session.commit()
+
+    response = await client.delete(
+        f"/api/v1/tasks/{task['id']}/calendar-export",
+        headers=headers,
+    )
+    assert response.status_code == 204
+
+    async with AsyncSessionLocal() as session:
+        link_result = await session.execute(
+            select(PlannerLink).where(PlannerLink.target_id == task["id"])
+        )
+        assert link_result.scalar_one_or_none() is None
+
+
+async def test_patch_task_event_time_updates_linked_event_db(client, monkeypatch):
+    email = "cal-task-event-time-endpoint@example.com"
+    headers, _ = await register_and_auth(client, email)
+    task = await _create_task_via_api(client, headers, "Timed task")
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(User).where(User.email == email))
+        user = result.scalar_one()
+        connection = CalendarConnection(
+            user_id=user.id,
+            provider="google",
+            status="active",
+            external_account_id="primary",
+            account_label="Google",
+            color="#4285F4",
+        )
+        session.add(connection)
+        await session.flush()
+
+        event = CalendarEvent(
+            connection_id=connection.id,
+            user_id=user.id,
+            external_event_id="google-task-time-endpoint",
+            external_calendar_id="primary",
+            title="Timed task",
+            description=None,
+            location=None,
+            starts_at=datetime(2026, 3, 9, 9, 0, tzinfo=timezone.utc),
+            ends_at=datetime(2026, 3, 9, 10, 0, tzinfo=timezone.utc),
+            source_timezone="UTC",
+            is_all_day=False,
+            status="confirmed",
+            raw_payload={},
+        )
+        session.add(event)
+        await session.flush()
+
+        session.add(PlannerLink(
+            user_id=user.id,
+            source_kind="calendar_event",
+            source_ref=f"{connection.id}:google-task-time-endpoint",
+            target_kind="task",
+            target_id=task["id"],
+            link_mode="import_copy",
+        ))
+        await session.commit()
+
+    async def fake_push_task_event_time_to_google(*_args, **_kwargs) -> None:
+        pass
+
+    monkeypatch.setattr("app.api.v1.tasks.push_task_event_time_to_google", fake_push_task_event_time_to_google)
+
+    response = await client.patch(
+        f"/api/v1/tasks/{task['id']}/event-time",
+        json={"starts_hhmm": "11:00", "ends_hhmm": "12:30"},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    data = extract_data(response)
+    assert "11:00" in data["starts_at"] or "11:00:00" in data["starts_at"]
+
+
+async def test_patch_task_event_time_returns_404_when_no_link(client, monkeypatch):
+    email = "cal-task-event-time-no-link@example.com"
+    headers, _ = await register_and_auth(client, email)
+    task = await _create_task_via_api(client, headers)
+
+    async def fake_push_task_event_time_to_google(*_args, **_kwargs) -> None:
+        pass
+
+    monkeypatch.setattr("app.api.v1.tasks.push_task_event_time_to_google", fake_push_task_event_time_to_google)
+
+    response = await client.patch(
+        f"/api/v1/tasks/{task['id']}/event-time",
+        json={"starts_hhmm": "10:00", "ends_hhmm": "11:00"},
+        headers=headers,
+    )
+    assert response.status_code == 404
