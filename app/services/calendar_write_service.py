@@ -429,6 +429,9 @@ async def push_task_to_google(
     user_id: str,
     task_id: str,
     connection_id: str,
+    schedule_days: list[int] | None = None,
+    starts_hhmm: str | None = None,
+    ends_hhmm: str | None = None,
 ) -> str:
     """Create a Google Calendar event for a task. Returns external_event_id.
 
@@ -488,20 +491,44 @@ async def push_task_to_google(
     start_day_index = max(0, min((task.start_day or 1) - 1, 6))
     event_date = date_from + timedelta(days=start_day_index)
 
-    created = await _google_post_event(
-        access_token,
-        connection.external_account_id,
-        {
+    if starts_hhmm and ends_hhmm:
+        event_body: dict = {
+            "summary": task.title or "Без названия",
+            "start": {"dateTime": f"{event_date.isoformat()}T{starts_hhmm}:00", "timeZone": "UTC"},
+            "end": {"dateTime": f"{event_date.isoformat()}T{ends_hhmm}:00", "timeZone": "UTC"},
+        }
+    else:
+        event_body = {
             "summary": task.title or "Без названия",
             "start": {"date": event_date.isoformat()},
             "end": {"date": event_date.isoformat()},
-        },
+        }
+
+    if schedule_days:
+        byday = ",".join(ISO_DAY_TO_BYDAY[d] for d in sorted(schedule_days) if d in ISO_DAY_TO_BYDAY)
+        if byday:
+            event_body["recurrence"] = [f"RRULE:FREQ=WEEKLY;BYDAY={byday}"]
+
+    created = await _google_post_event(
+        access_token,
+        connection.external_account_id,
+        event_body,
     )
     google_event_id = created.get("id")
     if not google_event_id:
         raise CalendarSyncError("Google API did not return event id")
 
-    start_at, end_at = all_day_bounds(event_date)
+    is_all_day = not (starts_hhmm and ends_hhmm)
+    if is_all_day:
+        start_at, end_at = all_day_bounds(event_date)
+        event_source_timezone = None
+    else:
+        start_h, start_m = (int(v) for v in starts_hhmm.split(":"))
+        end_h, end_m = (int(v) for v in ends_hhmm.split(":"))
+        start_at = datetime(event_date.year, event_date.month, event_date.day, start_h, start_m, tzinfo=timezone.utc)
+        end_at = datetime(event_date.year, event_date.month, event_date.day, end_h, end_m, tzinfo=timezone.utc)
+        event_source_timezone = "UTC"
+
     db.add(CalendarEvent(
         connection_id=connection_id,
         user_id=user_id,
@@ -512,8 +539,8 @@ async def push_task_to_google(
         location=None,
         starts_at=start_at,
         ends_at=end_at,
-        source_timezone=None,
-        is_all_day=True,
+        source_timezone=event_source_timezone,
+        is_all_day=is_all_day,
         status="confirmed",
         raw_payload=created,
         last_seen_at=utc_now(),

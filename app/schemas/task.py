@@ -69,6 +69,9 @@ class TaskCalendarExportBody(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     connection_id: str
+    schedule_days: list[int] | None = None   # 1=Пн … 7=Вс (ISO weekday)
+    starts_hhmm: str | None = None           # "HH:MM"
+    ends_hhmm: str | None = None             # "HH:MM"
 
 
 class TaskEventTimePatch(BaseModel):

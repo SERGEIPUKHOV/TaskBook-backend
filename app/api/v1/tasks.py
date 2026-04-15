@@ -79,7 +79,12 @@ async def export_task_to_calendar(
     db: AsyncSession = Depends(get_db),
 ) -> Response[dict]:
     try:
-        external_event_id = await push_task_to_google(db, current_user.id, task_id, body.connection_id)
+        external_event_id = await push_task_to_google(
+            db, current_user.id, task_id, body.connection_id,
+            schedule_days=body.schedule_days,
+            starts_hhmm=body.starts_hhmm,
+            ends_hhmm=body.ends_hhmm,
+        )
     except CalendarSyncError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     return Response(data={"external_event_id": external_event_id, "linked_event_time": None})
