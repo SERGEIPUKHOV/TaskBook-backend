@@ -1,21 +1,36 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 
 from fastapi import HTTPException, status
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.calendar_event import CalendarEvent
 from app.models.planner_link import PlannerLink
 from app.models.task import Task, TaskDayStatus
 from app.models.week import Week
+from app.schemas.habit import LinkedEventTimeOut
 from app.schemas.task import ReorderIn, TaskDayStatusOut, TaskOut, TaskPatch
 from app.services.cache_service import invalidate_dashboard
 from app.services.periods import week_bounds
 from app.services.week_service import get_or_create_week
 
+_TASK_LINK_MODES = ["import_copy", "export_copy"]
 
-def _serialize_task(task: Task, statuses: dict[str, str]) -> TaskOut:
+
+def _utc_iso(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
+def _serialize_task(
+    task: Task,
+    statuses: dict[str, str],
+    linked_event_time: LinkedEventTimeOut | None = None,
+    calendar_connection_id: str | None = None,
+) -> TaskOut:
     return TaskOut(
         id=task.id,
         title=task.title,
@@ -28,7 +43,71 @@ def _serialize_task(task: Task, statuses: dict[str, str]) -> TaskOut:
         calendar_export_bucket=task.calendar_export_bucket,
         carried_from_task_id=task.carried_from_task_id,
         statuses=statuses,
+        linked_event_time=linked_event_time,
+        calendar_connection_id=calendar_connection_id,
     )
+
+
+async def _fetch_linked_event_times_for_tasks(
+    db: AsyncSession,
+    user_id: str,
+    task_ids: list[str],
+) -> dict[str, tuple[LinkedEventTimeOut | None, str | None]]:
+    """Batch: task_id → (LinkedEventTimeOut | None, connection_id | None).
+
+    Searches both import_copy and export_copy PlannerLinks.
+    """
+    if not task_ids:
+        return {}
+
+    links_result = await db.execute(
+        select(PlannerLink).where(
+            PlannerLink.user_id == user_id,
+            PlannerLink.target_kind == "task",
+            PlannerLink.target_id.in_(task_ids),
+            PlannerLink.source_kind == "calendar_event",
+            PlannerLink.link_mode.in_(_TASK_LINK_MODES),
+        ),
+    )
+    links = links_result.scalars().all()
+    if not links:
+        return {}
+
+    ref_to_task: dict[tuple[str, str], tuple[str, str]] = {}
+    for link in links:
+        conn_id, sep, ext_id = link.source_ref.partition(":")
+        if sep and conn_id and ext_id:
+            ref_to_task[(conn_id, ext_id)] = (str(link.target_id), conn_id)
+
+    if not ref_to_task:
+        return {}
+
+    event_filters = [
+        and_(CalendarEvent.connection_id == conn_id, CalendarEvent.external_event_id == ext_id)
+        for conn_id, ext_id in ref_to_task
+    ]
+    events_result = await db.execute(
+        select(CalendarEvent).where(
+            CalendarEvent.user_id == user_id,
+            CalendarEvent.status != "cancelled",
+            or_(*event_filters),
+        ).order_by(CalendarEvent.starts_at.asc(), CalendarEvent.created_at.asc()),
+    )
+
+    result: dict[str, tuple[LinkedEventTimeOut | None, str | None]] = {}
+    for event in events_result.scalars().all():
+        task_conn = ref_to_task.get((str(event.connection_id), event.external_event_id))
+        if not task_conn:
+            continue
+        task_id, conn_id = task_conn
+        if task_id in result:
+            continue
+        time_out: LinkedEventTimeOut | None = None
+        if not event.is_all_day and event.starts_at is not None and event.ends_at is not None:
+            time_out = LinkedEventTimeOut(starts_at=_utc_iso(event.starts_at), ends_at=_utc_iso(event.ends_at))
+        result[task_id] = (time_out, conn_id)
+
+    return result
 
 
 async def _task_status_map(db: AsyncSession, task_ids: list[str]) -> dict[str, dict[str, str]]:
@@ -53,8 +132,18 @@ async def list_week_tasks(db: AsyncSession, user_id: str, year: int, week_number
         .order_by(Task.order.asc(), Task.created_at.asc()),
     )
     tasks = tasks_result.scalars().all()
-    statuses = await _task_status_map(db, [task.id for task in tasks])
-    return [_serialize_task(task, statuses.get(task.id, {})) for task in tasks]
+    task_ids = [task.id for task in tasks]
+    statuses = await _task_status_map(db, task_ids)
+    linked_times = await _fetch_linked_event_times_for_tasks(db, user_id, task_ids)
+    return [
+        _serialize_task(
+            task,
+            statuses.get(task.id, {}),
+            linked_event_time=linked_times.get(task.id, (None, None))[0],
+            calendar_connection_id=linked_times.get(task.id, (None, None))[1],
+        )
+        for task in tasks
+    ]
 
 
 async def create_task(
@@ -94,6 +183,76 @@ async def create_task(
     await db.refresh(task)
     await invalidate_dashboard(user_id)
     return _serialize_task(task, {})
+
+
+async def update_task_event_time(
+    db: AsyncSession,
+    user_id: str,
+    task_id: str,
+    starts_hhmm: str,
+    ends_hhmm: str,
+) -> LinkedEventTimeOut | None:
+    """Update time on the linked CalendarEvent for a task (DB side).
+
+    Returns new LinkedEventTimeOut, or None if no link found.
+    Works for both import_copy and export_copy links.
+    All-day events are promoted to timed using the event's UTC date.
+    """
+    link_result = await db.execute(
+        select(PlannerLink).where(
+            PlannerLink.user_id == user_id,
+            PlannerLink.target_kind == "task",
+            PlannerLink.target_id == task_id,
+            PlannerLink.source_kind == "calendar_event",
+            PlannerLink.link_mode.in_(_TASK_LINK_MODES),
+        ),
+    )
+    link = link_result.scalars().first()
+    if link is None:
+        return None
+
+    conn_id, sep, ext_id = link.source_ref.partition(":")
+    if not sep or not conn_id or not ext_id:
+        return None
+
+    event_result = await db.execute(
+        select(CalendarEvent).where(
+            CalendarEvent.connection_id == conn_id,
+            CalendarEvent.external_event_id == ext_id,
+            CalendarEvent.user_id == user_id,
+            CalendarEvent.status != "cancelled",
+        ),
+    )
+    event = event_result.scalar_one_or_none()
+    if event is None or event.starts_at is None or event.ends_at is None:
+        return None
+
+    start_h, start_m = (int(v) for v in starts_hhmm.split(":"))
+    end_h, end_m = (int(v) for v in ends_hhmm.split(":"))
+
+    if event.is_all_day:
+        event_date = event.starts_at.date()
+        new_start = datetime(event_date.year, event_date.month, event_date.day, start_h, start_m, tzinfo=timezone.utc)
+        new_end = datetime(event_date.year, event_date.month, event_date.day, end_h, end_m, tzinfo=timezone.utc)
+        event.is_all_day = False
+    else:
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+        tz_obj = timezone.utc
+        if event.source_timezone:
+            try:
+                tz_obj = ZoneInfo(event.source_timezone)
+            except ZoneInfoNotFoundError:
+                pass
+        base_start = event.starts_at if event.starts_at.tzinfo else event.starts_at.replace(tzinfo=timezone.utc)
+        base_end = event.ends_at if event.ends_at.tzinfo else event.ends_at.replace(tzinfo=timezone.utc)
+        new_start = base_start.astimezone(tz_obj).replace(hour=start_h, minute=start_m, second=0, microsecond=0).astimezone(timezone.utc)
+        new_end = base_end.astimezone(tz_obj).replace(hour=end_h, minute=end_m, second=0, microsecond=0).astimezone(timezone.utc)
+
+    event.starts_at = new_start
+    event.ends_at = new_end
+    await db.commit()
+    await db.refresh(event)
+    return LinkedEventTimeOut(starts_at=_utc_iso(event.starts_at), ends_at=_utc_iso(event.ends_at))
 
 
 async def get_task_for_user(db: AsyncSession, user_id: str, task_id: str) -> Task:

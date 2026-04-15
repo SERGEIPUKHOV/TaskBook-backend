@@ -7,7 +7,7 @@ from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.calendar_connection import CalendarConnection
@@ -74,20 +74,47 @@ async def _google_patch(
         raise CalendarSyncError(f"Google PATCH failed: {response.status_code} {response.text[:200]}")
 
 
+async def _google_post_event(
+    access_token: str,
+    calendar_id: str,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    """Create a Google Calendar event and return the created event dict."""
+    encoded_calendar_id = quote(calendar_id, safe="")
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.post(
+            f"{GOOGLE_API_BASE}/calendars/{encoded_calendar_id}/events",
+            json=body,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+    if response.status_code >= 400:
+        raise CalendarSyncError(f"Google POST event failed: {response.status_code} {response.text[:200]}")
+    return response.json()
+
+
+_TASK_LINK_MODES = ["import_copy", "export_copy"]
+
+
 async def _resolve_google_link(
     db: AsyncSession,
     user_id: str,
     target_kind: str,
     target_id: str,
+    link_modes: list[str] | None = None,
 ) -> tuple[CalendarEvent, CalendarConnection, CalendarProviderAccount] | None:
-    """Resolve planner item -> imported calendar event -> Google connection/account."""
+    """Resolve planner item -> linked calendar event -> Google connection/account.
+
+    link_modes: PlannerLink.link_mode values to search (default: ["import_copy"]).
+    Pass _TASK_LINK_MODES to find either direction for tasks.
+    """
+    effective_modes = link_modes if link_modes is not None else ["import_copy"]
     link_result = await db.execute(
         select(PlannerLink).where(
             PlannerLink.user_id == user_id,
             PlannerLink.target_kind == target_kind,
             PlannerLink.target_id == target_id,
             PlannerLink.source_kind == "calendar_event",
-            PlannerLink.link_mode == "import_copy",
+            PlannerLink.link_mode.in_(effective_modes),
         ),
     )
     link = link_result.scalars().first()
@@ -395,6 +422,273 @@ async def push_habit_event_time_to_google(
             habit_id,
             exc_info=True,
         )
+
+
+async def push_task_to_google(
+    db: AsyncSession,
+    user_id: str,
+    task_id: str,
+    connection_id: str,
+) -> str:
+    """Create a Google Calendar event for a task. Returns external_event_id.
+
+    Raises CalendarSyncError on failure — not best-effort because the user expects a result.
+    Removes any pre-existing PlannerLink for the task before creating a new one.
+    """
+    from app.models.task import Task
+    from app.models.week import Week
+    from app.services.calendar_sync_service import all_day_bounds, utc_now
+    from app.services.periods import week_bounds
+    from datetime import timedelta
+
+    task_result = await db.execute(select(Task).where(Task.id == task_id, Task.user_id == user_id))
+    task = task_result.scalar_one_or_none()
+    if task is None:
+        raise CalendarSyncError("Task not found")
+
+    await db.execute(
+        delete(PlannerLink).where(
+            PlannerLink.user_id == user_id,
+            PlannerLink.target_kind == "task",
+            PlannerLink.target_id == task_id,
+            PlannerLink.source_kind == "calendar_event",
+        ),
+    )
+    await db.flush()
+
+    connection_result = await db.execute(
+        select(CalendarConnection).where(
+            CalendarConnection.id == connection_id,
+            CalendarConnection.user_id == user_id,
+            CalendarConnection.provider == "google",
+        ),
+    )
+    connection = connection_result.scalar_one_or_none()
+    if connection is None or not connection.external_account_id or connection.provider_account_id is None:
+        raise CalendarSyncError("Google connection not found or incomplete")
+
+    provider_account_result = await db.execute(
+        select(CalendarProviderAccount).where(CalendarProviderAccount.id == connection.provider_account_id),
+    )
+    provider_account = provider_account_result.scalar_one_or_none()
+    if provider_account is None:
+        raise CalendarSyncError("Google provider account not found")
+
+    access_token, token_changed = await _ensure_google_access_token(provider_account)
+    if token_changed:
+        await db.commit()
+        await db.refresh(provider_account)
+
+    week_result = await db.execute(select(Week).where(Week.id == task.week_id))
+    week = week_result.scalar_one_or_none()
+    if week is None:
+        raise CalendarSyncError("Task week not found")
+
+    date_from, _ = week_bounds(week.year, week.week_number)
+    start_day_index = max(0, min((task.start_day or 1) - 1, 6))
+    event_date = date_from + timedelta(days=start_day_index)
+
+    created = await _google_post_event(
+        access_token,
+        connection.external_account_id,
+        {
+            "summary": task.title or "Без названия",
+            "start": {"date": event_date.isoformat()},
+            "end": {"date": event_date.isoformat()},
+        },
+    )
+    google_event_id = created.get("id")
+    if not google_event_id:
+        raise CalendarSyncError("Google API did not return event id")
+
+    start_at, end_at = all_day_bounds(event_date)
+    db.add(CalendarEvent(
+        connection_id=connection_id,
+        user_id=user_id,
+        external_event_id=google_event_id,
+        external_calendar_id=connection.external_account_id,
+        title=task.title or "Без названия",
+        description=None,
+        location=None,
+        starts_at=start_at,
+        ends_at=end_at,
+        source_timezone=None,
+        is_all_day=True,
+        status="confirmed",
+        raw_payload=created,
+        last_seen_at=utc_now(),
+    ))
+    await db.flush()
+
+    db.add(PlannerLink(
+        user_id=user_id,
+        source_kind="calendar_event",
+        source_ref=f"{connection_id}:{google_event_id}",
+        target_kind="task",
+        target_id=task_id,
+        link_mode="export_copy",
+    ))
+    await db.commit()
+    return google_event_id
+
+
+async def push_task_event_time_to_google(
+    db: AsyncSession,
+    user_id: str,
+    task_id: str,
+    starts_hhmm: str,
+    ends_hhmm: str,
+) -> None:
+    """Best-effort: PATCH linked Google Calendar event time for a task.
+
+    Works for import_copy and export_copy links.
+    All-day events are converted to timed events.
+    """
+    try:
+        resolved = await _resolve_google_link(db, user_id, "task", task_id, link_modes=_TASK_LINK_MODES)
+        if resolved is None:
+            return
+
+        event, connection, provider_account = resolved
+        access_token, token_changed = await _ensure_google_access_token(provider_account)
+        if token_changed:
+            await db.commit()
+            await db.refresh(provider_account)
+
+        if event.starts_at is None or event.ends_at is None:
+            return
+
+        start_h, start_m = (int(v) for v in starts_hhmm.split(":"))
+        end_h, end_m = (int(v) for v in ends_hhmm.split(":"))
+
+        if event.is_all_day:
+            event_date = event.starts_at.date()
+            new_start = datetime(event_date.year, event_date.month, event_date.day, start_h, start_m, tzinfo=timezone.utc)
+            new_end = datetime(event_date.year, event_date.month, event_date.day, end_h, end_m, tzinfo=timezone.utc)
+            start_payload: dict[str, str] = {"dateTime": new_start.isoformat(), "timeZone": "UTC"}
+            end_payload: dict[str, str] = {"dateTime": new_end.isoformat(), "timeZone": "UTC"}
+        else:
+            new_start, start_tz = _replace_google_wall_time(
+                event.starts_at, hour=start_h, minute=start_m, source_timezone=event.source_timezone,
+            )
+            new_end, end_tz = _replace_google_wall_time(
+                event.ends_at, hour=end_h, minute=end_m, source_timezone=event.source_timezone,
+            )
+            start_payload = {"dateTime": new_start.isoformat()}
+            end_payload = {"dateTime": new_end.isoformat()}
+            if start_tz:
+                start_payload["timeZone"] = start_tz
+            if end_tz:
+                end_payload["timeZone"] = end_tz
+
+        await _google_patch(
+            access_token,
+            connection.external_account_id,
+            event.external_event_id,
+            {"start": start_payload, "end": end_payload},
+        )
+    except Exception:
+        logger.debug("push_task_event_time_to_google: best-effort failed for task %s", task_id, exc_info=True)
+
+
+async def unlink_task_from_google(db: AsyncSession, user_id: str, task_id: str) -> None:
+    """Delete the PlannerLink between task and Google Calendar event.
+
+    Both the task and the Google event remain; only the link is removed.
+    """
+    await db.execute(
+        delete(PlannerLink).where(
+            PlannerLink.user_id == user_id,
+            PlannerLink.target_kind == "task",
+            PlannerLink.target_id == task_id,
+            PlannerLink.source_kind == "calendar_event",
+            PlannerLink.link_mode.in_(_TASK_LINK_MODES),
+        ),
+    )
+    await db.commit()
+
+
+async def backpropagate_google_changes_to_tasks(
+    db: AsyncSession,
+    connection_id: str,
+    user_id: str,
+    synced_events: list[Any],
+) -> None:
+    """Best-effort: after Google sync, apply changes from linked events back to tasks.
+
+    - title changed → update task title
+    - date changed within same week → update task start_day
+    - event cancelled → remove PlannerLink (task stays)
+    """
+    try:
+        from app.models.task import Task
+        from app.models.week import Week
+        from app.services.calendar_sync_service import ensure_utc
+        from app.services.periods import week_bounds
+
+        links_result = await db.execute(
+            select(PlannerLink).where(
+                PlannerLink.user_id == user_id,
+                PlannerLink.source_kind == "calendar_event",
+                PlannerLink.source_ref.like(f"{connection_id}:%"),
+                PlannerLink.target_kind == "task",
+                PlannerLink.link_mode.in_(_TASK_LINK_MODES),
+            ),
+        )
+        links = links_result.scalars().all()
+        if not links:
+            return
+
+        link_by_event_id: dict[str, PlannerLink] = {}
+        for link in links:
+            _, sep, ext_id = link.source_ref.partition(":")
+            if sep and ext_id:
+                link_by_event_id[ext_id] = link
+
+        if not link_by_event_id:
+            return
+
+        task_ids = list({str(link.target_id) for link in links})
+        tasks_result = await db.execute(
+            select(Task).where(Task.id.in_(task_ids), Task.user_id == user_id),
+        )
+        tasks_by_id: dict[str, Task] = {str(t.id): t for t in tasks_result.scalars().all()}
+        weeks_cache: dict[str, Week] = {}
+
+        for event in synced_events:
+            link = link_by_event_id.get(event.external_event_id)
+            if link is None:
+                continue
+            task = tasks_by_id.get(str(link.target_id))
+            if task is None:
+                continue
+
+            if event.status == "cancelled":
+                await db.delete(link)
+                continue
+
+            if event.title and event.title != task.title:
+                task.title = event.title
+
+            if event.starts_at is not None:
+                week_id = str(task.week_id)
+                week = weeks_cache.get(week_id)
+                if week is None:
+                    w_result = await db.execute(select(Week).where(Week.id == week_id))
+                    week = w_result.scalar_one_or_none()
+                    if week is not None:
+                        weeks_cache[week_id] = week
+                if week is not None:
+                    event_date = ensure_utc(event.starts_at).date()
+                    date_from, date_to = week_bounds(week.year, week.week_number)
+                    if date_from <= event_date <= date_to:
+                        new_start_day = (event_date - date_from).days + 1
+                        if task.start_day != new_start_day:
+                            task.start_day = new_start_day
+
+        await db.commit()
+    except Exception:
+        logger.debug("backpropagate_google_changes_to_tasks: best-effort failed", exc_info=True)
 
 
 def _parse_rrule_schedule_days(rrule_str: str) -> list[int] | None:

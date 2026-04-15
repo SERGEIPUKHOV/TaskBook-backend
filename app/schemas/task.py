@@ -5,6 +5,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.habit import LinkedEventTimeOut
+
 TaskStatus = Literal["done", "moved", "failed", "planned"]
 TaskCalendarExportBucket = Literal["default", "work", "personal", "family"]
 
@@ -59,6 +61,21 @@ class TaskOut(BaseModel):
     calendar_export_bucket: TaskCalendarExportBucket | None
     carried_from_task_id: str | None
     statuses: dict[str, TaskStatus] = Field(default_factory=dict)
+    linked_event_time: LinkedEventTimeOut | None = None
+    calendar_connection_id: str | None = None
+
+
+class TaskCalendarExportBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    connection_id: str
+
+
+class TaskEventTimePatch(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    starts_hhmm: str = Field(pattern=r"^\d{2}:\d{2}$")
+    ends_hhmm: str = Field(pattern=r"^\d{2}:\d{2}$")
 
 
 class TaskDayStatusOut(BaseModel):

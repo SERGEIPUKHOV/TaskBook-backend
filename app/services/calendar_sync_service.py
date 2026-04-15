@@ -303,8 +303,9 @@ async def reconcile_connection_events(
     await db.commit()
     await db.refresh(connection)
 
-    from app.services.calendar_write_service import backpropagate_google_rrule_to_habits
+    from app.services.calendar_write_service import backpropagate_google_rrule_to_habits, backpropagate_google_changes_to_tasks
     await backpropagate_google_rrule_to_habits(db, str(connection.id), str(connection.user_id), events)
+    await backpropagate_google_changes_to_tasks(db, str(connection.id), str(connection.user_id), events)
 
     return connection
 
