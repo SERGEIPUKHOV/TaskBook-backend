@@ -26,7 +26,7 @@ class SupervisionMiddleware(BaseHTTPMiddleware):
         request.state.view_as_user_id = owner_id
         request.state.view_as_enabled = True
 
-        if request.url.path.startswith(BLOCKED_PREFIXES):
+        if request.url.path.startswith(BLOCKED_PREFIXES) and request.url.path != "/api/v1/users/me":
             return JSONResponse(status_code=403, content={"detail": "Доступ запрещён"})
 
         if request.method in MUTATING_METHODS and not request.url.path.startswith(SUPERVISION_PREFIX):
