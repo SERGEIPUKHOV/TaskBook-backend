@@ -24,6 +24,7 @@ async def list_granted_owners(db: AsyncSession, supervisor_id: str) -> list[dict
         .where(
             SupervisorGrant.supervisor_id == supervisor_id,
             SupervisorGrant.status == "active",
+            SupervisorGrant.owner_id != supervisor_id,
             User.is_active.is_(True),
         )
         .order_by(User.email.asc())
