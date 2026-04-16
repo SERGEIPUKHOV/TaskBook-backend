@@ -5,7 +5,7 @@ from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, Response as FastAPIResponse, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_subject_user
 from app.core.database import get_db
 from app.models.user import User
 from app.schemas.common import Response
@@ -35,7 +35,7 @@ async def read_day_bundle(
     year: int,
     month: int,
     day: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_subject_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response[DayBundleOut]:
     """
@@ -63,7 +63,7 @@ async def read_day_bundle(
 @router.get("/{target_date}/events", response_model=Response[list[KeyEventOut]])
 async def read_events(
     target_date: date,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_subject_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response[list[KeyEventOut]]:
     """
@@ -147,7 +147,7 @@ async def remove_event(
 @router.get("/{target_date}/gratitudes", response_model=Response[list[GratitudeOut]])
 async def read_gratitudes(
     target_date: date,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_subject_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response[list[GratitudeOut]]:
     """

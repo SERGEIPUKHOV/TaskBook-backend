@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.v1 import admin, auth, calendar, dashboard, days, habits, months, tasks, users, weeks
+from app.api.v1 import admin, auth, calendar, dashboard, days, habits, months, supervision, tasks, users, weeks
 
 api_router = APIRouter()
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
@@ -14,6 +14,7 @@ api_router.include_router(tasks.router, prefix="/tasks", tags=["tasks"])
 api_router.include_router(days.router, prefix="/days", tags=["days"])
 api_router.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"])
 api_router.include_router(calendar.router, prefix="/calendar", tags=["calendar"])
+api_router.include_router(supervision.router)
 api_router.include_router(admin.router, prefix="/admin", tags=["admin"])
 
 __all__ = ["api_router"]

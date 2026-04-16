@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Query, Response as FastAPIResponse, stat
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_subject_user
 from app.core.database import get_db
 from app.models.user import User
 from app.schemas.calendar import (
@@ -47,7 +47,7 @@ router = APIRouter()
 
 @router.get("/connections", response_model=Response[list[CalendarConnectionOut]])
 async def read_connections(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_subject_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response[list[CalendarConnectionOut]]:
     return Response(data=await list_calendar_connections(db, current_user.id))
@@ -73,7 +73,7 @@ async def google_callback(
 
 @router.get("/google/calendars", response_model=Response[GoogleCalendarOptionsOut])
 async def read_google_calendars(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_subject_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response[GoogleCalendarOptionsOut]:
     return Response(data=await read_google_calendar_options(db, current_user.id))
@@ -154,7 +154,7 @@ async def patch_connection_color(
 async def read_events(
     date_from: date = Query(...),
     date_to: date = Query(...),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_subject_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response[CalendarEventsRangeOut]:
     return Response(data=await list_calendar_events_range(db, current_user.id, date_from=date_from, date_to=date_to))
@@ -172,7 +172,7 @@ async def import_event(
 
 @router.get("/feeds/tasks/links", response_model=Response[list[CalendarTaskFeedLinkOut]])
 async def read_task_feed_links(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_subject_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response[list[CalendarTaskFeedLinkOut]]:
     return Response(data=await list_task_feeds(db, current_user.id))

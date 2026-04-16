@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Response as FastAPIResponse, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_subject_user
 from app.core.database import get_db
 from app.models.user import User
 from app.schemas.common import Response
@@ -20,7 +20,7 @@ router = APIRouter()
 async def read_plan(
     year: int,
     month: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_subject_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response[MonthPlanOut | None]:
     return Response(data=await get_month_plan(db, current_user.id, year, month))
@@ -41,7 +41,7 @@ async def write_plan(
 async def read_states(
     year: int,
     month: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_subject_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response[list[DailyStateOut]]:
     return Response(data=await get_month_states(db, current_user.id, year, month))
@@ -75,7 +75,7 @@ async def remove_state(
 async def read_bundle(
     year: int,
     month: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_subject_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response[MonthBundleOut]:
     return Response(data=await get_month_bundle(db, current_user.id, year, month))

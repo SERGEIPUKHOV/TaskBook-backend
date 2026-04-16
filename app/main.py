@@ -18,6 +18,7 @@ from app.core.logging import configure_logging
 from app.core.observability import init_sentry
 from app.core.rate_limit import RateLimitMiddleware, get_client_ip
 from app.core.redis import redis_client
+from app.middleware.supervision import SupervisionMiddleware
 from app.services.auth_service import ensure_seed_users
 
 configure_logging(settings.LOG_LEVEL)
@@ -53,6 +54,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(RateLimitMiddleware)
+app.add_middleware(SupervisionMiddleware)
 app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 
 

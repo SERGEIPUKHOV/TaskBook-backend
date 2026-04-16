@@ -10,8 +10,17 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.security import decode_token
 from app.models.user import User
+from app.services.supervision_service import get_active_grant_for_view, get_subject_owner_for_view
 
 bearer_scheme = HTTPBearer(auto_error=False)
+SECTION_BY_PATH_PREFIX: tuple[tuple[str, str], ...] = (
+    ("/api/v1/dashboard", "dashboard"),
+    ("/api/v1/months/", "month"),
+    ("/api/v1/weeks/", "week"),
+    ("/api/v1/days/", "day"),
+    ("/api/v1/calendar/", "calendar"),
+    ("/api/v1/habits/months/", "month"),
+)
 
 
 # BLOCK-START: AUTH_DEPS_MODULE
@@ -131,6 +140,41 @@ async def get_optional_user(
         raise credentials_exception
 
     return user
+
+
+def _resolve_requested_section(path: str) -> str | None:
+    for prefix, section in SECTION_BY_PATH_PREFIX:
+        if path.startswith(prefix):
+            return section
+    return None
+
+
+async def get_subject_user(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    view_as_owner_id = getattr(request.state, "view_as_user_id", None)
+    if not view_as_owner_id:
+        return current_user
+
+    requested_section = _resolve_requested_section(request.url.path)
+    if requested_section is None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Доступ запрещён")
+
+    grant = await get_active_grant_for_view(
+        db,
+        owner_id=view_as_owner_id,
+        supervisor_id=current_user.id,
+    )
+    if grant is None or requested_section not in set(grant.sections or []):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Доступ запрещён")
+
+    return await get_subject_owner_for_view(
+        db,
+        owner_id=view_as_owner_id,
+        supervisor_id=current_user.id,
+    )
 # BLOCK-END: AUTH_DEPS_MODULE
 
-__all__ = ["get_current_user", "get_optional_user"]
+__all__ = ["get_current_user", "get_optional_user", "get_subject_user"]

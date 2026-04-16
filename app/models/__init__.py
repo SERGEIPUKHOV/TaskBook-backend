@@ -6,6 +6,7 @@ from app.models.day_entry import Gratitude, KeyEvent
 from app.models.habit import Habit, HabitLog
 from app.models.month_plan import MonthPlan
 from app.models.planner_link import PlannerLink
+from app.models.supervisor_grant import SupervisorGrant
 from app.models.task import Task, TaskDayStatus
 from app.models.user import User
 from app.models.week import Week
@@ -21,6 +22,7 @@ __all__ = [
     "KeyEvent",
     "MonthPlan",
     "PlannerLink",
+    "SupervisorGrant",
     "Task",
     "TaskDayStatus",
     "User",

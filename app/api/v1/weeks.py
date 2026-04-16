@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_subject_user
 from app.core.database import get_db
 from app.models.user import User
 from app.schemas.common import Response
@@ -20,7 +20,7 @@ router = APIRouter()
 async def read_week(
     year: int,
     week_number: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_subject_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response[WeekOut]:
     week = await get_or_create_week(db, current_user.id, year, week_number)
@@ -42,7 +42,7 @@ async def patch_week(
 async def read_tasks(
     year: int,
     week_number: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_subject_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response[list[TaskOut]]:
     return Response(data=await list_week_tasks(db, current_user.id, year, week_number))
@@ -88,7 +88,7 @@ async def reorder_week_tasks(
 async def read_bundle(
     year: int,
     week_number: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_subject_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response[WeekBundleOut]:
     return Response(data=await get_week_bundle(db, current_user.id, year, week_number))

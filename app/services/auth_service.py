@@ -21,6 +21,7 @@ from app.core.security import (
 from app.models.user import User
 from app.schemas.auth import AuthResponseOut, AuthUserOut
 from app.services.habit_service import seed_default_habits_for_user
+from app.services.supervision_service import resolve_pending_grants_for_new_user
 
 # BLOCK-START: AUTH_SERVICE_MODULE
 # Description: Auth domain service for browser-cookie sessions, password recovery, and seed users.
@@ -84,6 +85,7 @@ async def register_user(db: AsyncSession, email: str, password: str) -> AuthResp
     await db.flush()
     await seed_default_habits_for_user(db, user.id)
     await db.commit()
+    await resolve_pending_grants_for_new_user(db, user)
     await db.refresh(user)
     logger.info("[AUTH][REGISTER][SUCCESS] user_id=%s", user.id)
     return await issue_auth_tokens(user)

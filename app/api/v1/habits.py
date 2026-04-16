@@ -5,7 +5,7 @@ from datetime import date
 from fastapi import APIRouter, Depends, Response as FastAPIResponse, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_subject_user
 from app.core.database import get_db
 from app.models.user import User
 from app.schemas.common import Response
@@ -37,7 +37,7 @@ router = APIRouter()
 async def read_habits(
     year: int,
     month: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_subject_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response[list[HabitOut]]:
     """
@@ -219,7 +219,7 @@ async def unmark_habit(
 async def read_habit_grid(
     year: int,
     month: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_subject_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response[HabitGridOut]:
     """
