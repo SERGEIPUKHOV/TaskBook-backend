@@ -68,6 +68,16 @@ export function UsersPage() {
     }
   }
 
+  const handleToggleTracker = async (user: AdminUser) => {
+    try {
+      const updated = await usersApi.setTrackerEnabled(user.id, !user.tasktracker_enabled)
+      setData((prev) => prev ? { ...prev, items: prev.items.map((u) => u.id === updated.id ? updated : u) } : prev)
+      showToast(updated.tasktracker_enabled ? "TaskTracker включён" : "TaskTracker отключён")
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "Ошибка", "error")
+    }
+  }
+
   return (
     <div className="max-w-5xl">
       <div className="flex items-center justify-between mb-5">
@@ -86,6 +96,7 @@ export function UsersPage() {
           onResetPassword={setResetTarget}
           onSetEmail={setEmailTarget}
           onImpersonate={handleImpersonate}
+          onToggleTracker={handleToggleTracker}
         />
         <div className="px-4 border-t border-border">
           <Pagination page={page} total={data?.total ?? 0} perPage={20} onChange={setPage} />

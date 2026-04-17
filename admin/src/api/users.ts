@@ -5,6 +5,7 @@ export interface AdminUser {
   email: string
   is_active: boolean
   is_admin: boolean
+  tasktracker_enabled: boolean
   created_at: string
   tasks_count: number
 }
@@ -40,4 +41,9 @@ export const usersApi = {
     request<ResetPasswordResult>(`/admin/users/${userId}/reset-password`, { method: "POST" }),
   impersonate: (userId: string) =>
     request<{ code: string }>(`/admin/users/${userId}/impersonate`, { method: "POST" }),
+  setTrackerEnabled: (userId: string, tasktracker_enabled: boolean) =>
+    request<AdminUser>(`/admin/users/${userId}/tasktracker`, {
+      method: "PATCH",
+      body: JSON.stringify({ tasktracker_enabled }),
+    }),
 }

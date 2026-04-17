@@ -21,6 +21,7 @@ from app.schemas.admin import (
     ResetPasswordOut,
     SetActiveIn,
     SetEmailIn,
+    SetTrackerIn,
 )
 from app.schemas.common import Response
 
@@ -40,6 +41,7 @@ def build_admin_user_out(user: User, tasks_count: int) -> AdminUserOut:
         email=user.email,
         is_active=user.is_active,
         is_admin=user.is_admin,
+        tasktracker_enabled=user.tasktracker_enabled,
         created_at=user.created_at,
         tasks_count=tasks_count,
     )
@@ -170,6 +172,27 @@ async def set_user_active(
 
     return Response(data=build_admin_user_out(user, await get_user_tasks_count(db, user.id)))
 # BLOCK-END: ADMIN_USER_STATUS_ENDPOINT
+
+
+# BLOCK-START: ADMIN_USER_TRACKER_ENDPOINT
+# Description: Toggles TaskTracker access flag for a target user.
+@router.patch("/users/{user_id}/tasktracker", response_model=Response[AdminUserOut])
+async def set_user_tasktracker(
+    user_id: str,
+    data: SetTrackerIn,
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(require_admin),
+) -> Response[AdminUserOut]:
+    user = await get_admin_target_user(db, user_id)
+    ensure_admin_target_allowed(current_admin, user)
+
+    user.tasktracker_enabled = data.tasktracker_enabled
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+
+    return Response(data=build_admin_user_out(user, await get_user_tasks_count(db, user.id)))
+# BLOCK-END: ADMIN_USER_TRACKER_ENDPOINT
 
 
 # BLOCK-START: ADMIN_USER_EMAIL_ENDPOINT

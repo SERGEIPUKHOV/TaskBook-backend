@@ -62,8 +62,10 @@ async def test_supervision_view_as_allows_only_granted_reads(client):
     )
     assert blocked_mutation.status_code == 403
 
-    blocked_profile = await client.get("/api/v1/users/me", headers=view_headers)
-    assert blocked_profile.status_code == 403
+    # /api/v1/users/me is intentionally allowed in view-as mode so the supervisor's
+    # own profile loads (supervision-viewas-bar fix, v9.54.35)
+    allowed_profile = await client.get("/api/v1/users/me", headers=view_headers)
+    assert allowed_profile.status_code == 200
 
 
 async def test_supervision_rejects_self_grant(client):

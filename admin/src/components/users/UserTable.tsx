@@ -7,10 +7,11 @@ interface Props {
   onResetPassword: (user: AdminUser) => void
   onSetEmail: (user: AdminUser) => void
   onImpersonate: (user: AdminUser) => void
+  onToggleTracker: (user: AdminUser) => void
   loading: boolean
 }
 
-export function UserTable({ users, onBlock, onResetPassword, onSetEmail, onImpersonate, loading }: Props) {
+export function UserTable({ users, onBlock, onResetPassword, onSetEmail, onImpersonate, onToggleTracker, loading }: Props) {
   if (loading) return (
     <div className="flex justify-center py-12">
       <svg className="animate-spin h-6 w-6 text-accent" viewBox="0 0 24 24" fill="none">
@@ -45,6 +46,7 @@ export function UserTable({ users, onBlock, onResetPassword, onSetEmail, onImper
               onResetPassword={onResetPassword}
               onSetEmail={onSetEmail}
               onImpersonate={onImpersonate}
+              onToggleTracker={onToggleTracker}
             />
           ))}
         </tbody>

@@ -8,13 +8,14 @@ interface Props {
   onResetPassword: (user: AdminUser) => void
   onSetEmail: (user: AdminUser) => void
   onImpersonate: (user: AdminUser) => void
+  onToggleTracker: (user: AdminUser) => void
 }
 
 function fmt(iso: string) {
   return new Date(iso).toLocaleDateString("ru", { day: "2-digit", month: "2-digit", year: "numeric" })
 }
 
-export function UserRow({ user, onBlock, onResetPassword, onSetEmail, onImpersonate }: Props) {
+export function UserRow({ user, onBlock, onResetPassword, onSetEmail, onImpersonate, onToggleTracker }: Props) {
   return (
     <tr className="border-b border-border last:border-0 hover:bg-surface transition-colors">
       <td className="py-3 px-4 text-sm text-text-primary font-medium">{user.email}</td>
@@ -26,6 +27,13 @@ export function UserRow({ user, onBlock, onResetPassword, onSetEmail, onImperson
           <Button variant="ghost" size="sm" onClick={() => onSetEmail(user)}>Email</Button>
           <Button variant="ghost" size="sm" onClick={() => onResetPassword(user)}>Пароль</Button>
           <Button variant="ghost" size="sm" onClick={() => onImpersonate(user)}>Войти</Button>
+          <Button
+            variant={user.tasktracker_enabled ? "primary" : "ghost"}
+            size="sm"
+            onClick={() => onToggleTracker(user)}
+          >
+            Трекер {user.tasktracker_enabled ? "ON" : "OFF"}
+          </Button>
           <Button variant={user.is_active ? "danger" : "primary"} size="sm" onClick={() => onBlock(user)}>
             {user.is_active ? "Заблокировать" : "Разблокировать"}
           </Button>

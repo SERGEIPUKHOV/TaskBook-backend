@@ -10,6 +10,7 @@ class AdminUserOut(BaseModel):
     email: str
     is_active: bool
     is_admin: bool
+    tasktracker_enabled: bool
     created_at: datetime
     tasks_count: int
 
@@ -25,6 +26,10 @@ class AdminUsersPageOut(BaseModel):
 
 class SetActiveIn(BaseModel):
     is_active: bool
+
+
+class SetTrackerIn(BaseModel):
+    tasktracker_enabled: bool
 
 
 class SetEmailIn(BaseModel):
