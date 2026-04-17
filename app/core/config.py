@@ -8,7 +8,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     APP_ENV: str = "development"
-    APP_VERSION: str = "10.2.2"
+    APP_VERSION: str = "10.3.3"
     API_V1_PREFIX: str = "/api/v1"
     SECRET_KEY: str = "change_me_in_production"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
