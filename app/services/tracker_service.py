@@ -4,7 +4,7 @@ from collections import defaultdict
 from datetime import date
 
 from fastapi import HTTPException, status
-from sqlalchemy import delete, select, update
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.tracker_goal import TrackerGoal
@@ -318,14 +318,31 @@ async def _get_deadlines_between(db: AsyncSession, user_id: str, start_date: dat
     if active_sprint is None:
         return []
 
+    today = date.today()
+
+    await db.execute(
+        update(TrackerGoal)
+        .where(
+            TrackerGoal.user_id == user_id,
+            TrackerGoal.sprint_id == active_sprint.id,
+            TrackerGoal.deadline_date.is_not(None),
+            TrackerGoal.deadline_date < today,
+            TrackerGoal.status.is_(None),
+        )
+        .values(status="not_done"),
+    )
+    await db.commit()
+
     result = await db.execute(
         select(TrackerGoal)
         .where(
             TrackerGoal.user_id == user_id,
             TrackerGoal.sprint_id == active_sprint.id,
             TrackerGoal.deadline_date.is_not(None),
-            TrackerGoal.deadline_date >= start_date,
-            TrackerGoal.deadline_date <= end_date,
+            or_(
+                and_(TrackerGoal.deadline_date >= start_date, TrackerGoal.deadline_date <= end_date),
+                and_(TrackerGoal.deadline_date < start_date, TrackerGoal.status == "not_done"),
+            ),
         )
         .order_by(TrackerGoal.deadline_date.asc(), TrackerGoal.sort_order.asc(), TrackerGoal.created_at.asc()),
     )

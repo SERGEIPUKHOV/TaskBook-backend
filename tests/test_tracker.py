@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 from sqlalchemy import select
 
 from app.core.database import AsyncSessionLocal
@@ -216,6 +218,110 @@ async def test_tracker_deadlines_for_week_and_day_use_active_sprint_with_breadcr
     day_deadlines = extract_data(day_response)
     assert len(day_deadlines) == 1
     assert day_deadlines[0]["title"] == "Sleep by 23:00"
+
+
+async def test_tracker_deadlines_lazy_write_and_carry_forward(client):
+    headers, _ = await register_tracker_user(client, "tracker-deadline-status-logic@example.com")
+    today = date.today()
+    yesterday = today - timedelta(days=1)
+    two_days_ago = today - timedelta(days=2)
+    three_days_ago = today - timedelta(days=3)
+    tomorrow = today + timedelta(days=1)
+    week_year, week_num, _ = today.isocalendar()
+    sprint = await create_sprint(
+        client,
+        headers,
+        "Deadline logic sprint",
+        (today - timedelta(days=14)).isoformat(),
+        (today + timedelta(days=14)).isoformat(),
+    )
+    meta = await create_goal(
+        client,
+        headers,
+        sprint["id"],
+        {"section": "money", "level": 1, "title": "Money meta"},
+    )
+    goal = await create_goal(
+        client,
+        headers,
+        sprint["id"],
+        {"section": "money", "level": 2, "parent_id": meta["id"], "title": "Money goal", "hypothesis": "Stay focused"},
+    )
+    lazy_goal = await create_goal(
+        client,
+        headers,
+        sprint["id"],
+        {"section": "money", "level": 3, "parent_id": goal["id"], "title": "Lazy overdue", "deadline_date": yesterday.isoformat()},
+    )
+    carry_goal = await create_goal(
+        client,
+        headers,
+        sprint["id"],
+        {"section": "money", "level": 3, "parent_id": goal["id"], "title": "Carry overdue", "deadline_date": two_days_ago.isoformat()},
+    )
+    terminal_goal = await create_goal(
+        client,
+        headers,
+        sprint["id"],
+        {
+            "section": "money",
+            "level": 3,
+            "parent_id": goal["id"],
+            "title": "Terminal overdue",
+            "deadline_date": three_days_ago.isoformat(),
+        },
+    )
+    today_goal = await create_goal(
+        client,
+        headers,
+        sprint["id"],
+        {"section": "money", "level": 3, "parent_id": goal["id"], "title": "Today deadline", "deadline_date": today.isoformat()},
+    )
+    await create_goal(
+        client,
+        headers,
+        sprint["id"],
+        {"section": "money", "level": 3, "parent_id": goal["id"], "title": "Tomorrow deadline", "deadline_date": tomorrow.isoformat()},
+    )
+
+    carry_patch_response = await client.patch(
+        f"/api/v1/tracker/goals/{carry_goal['id']}",
+        json={"status": "not_done"},
+        headers=headers,
+    )
+    assert carry_patch_response.status_code == 200
+
+    terminal_patch_response = await client.patch(
+        f"/api/v1/tracker/goals/{terminal_goal['id']}",
+        json={"status": "done_with_delay"},
+        headers=headers,
+    )
+    assert terminal_patch_response.status_code == 200
+
+    day_response = await client.get(f"/api/v1/tracker/deadlines/day?date={today.isoformat()}", headers=headers)
+    assert day_response.status_code == 200
+    day_deadlines = extract_data(day_response)
+    assert [item["title"] for item in day_deadlines] == ["Carry overdue", "Lazy overdue", "Today deadline"]
+
+    week_response = await client.get(
+        f"/api/v1/tracker/deadlines/week?week_year={week_year}&week_num={week_num}",
+        headers=headers,
+    )
+    assert week_response.status_code == 200
+    week_titles = [item["title"] for item in extract_data(week_response)]
+    assert "Carry overdue" in week_titles
+    assert "Lazy overdue" in week_titles
+    assert "Today deadline" in week_titles
+    assert "Terminal overdue" in week_titles
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(TrackerGoal).where(TrackerGoal.id == lazy_goal["id"]))
+        refreshed_lazy_goal = result.scalar_one()
+        assert refreshed_lazy_goal.status == "not_done"
+
+        today_result = await session.execute(select(TrackerGoal).where(TrackerGoal.id == today_goal["id"]))
+        refreshed_today_goal = today_result.scalar_one()
+        assert refreshed_today_goal.status is None
 
 
 async def test_delete_sprint_and_goal_remove_descendants(client):
