@@ -323,7 +323,6 @@ async def _get_deadlines_between(db: AsyncSession, user_id: str, start_date: dat
         .where(
             TrackerGoal.user_id == user_id,
             TrackerGoal.sprint_id == active_sprint.id,
-            TrackerGoal.level == 3,
             TrackerGoal.deadline_date.is_not(None),
             TrackerGoal.deadline_date >= start_date,
             TrackerGoal.deadline_date <= end_date,
