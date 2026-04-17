@@ -115,12 +115,6 @@ async def _validate_parent_goal(
     return parent
 
 
-def _normalize_goal_payload(level: int, hypothesis: str | None, deadline_date: date | None, status: str | None) -> tuple[str | None, date | None, str | None]:
-    if level == 1:
-        return None, None, None
-    if level == 2:
-        return hypothesis, None, None
-    return None, deadline_date, status
 
 
 async def _set_active_sprint(db: AsyncSession, user_id: str, sprint_id: str) -> None:
@@ -231,12 +225,6 @@ async def list_goals(db: AsyncSession, user_id: str, sprint_id: str) -> list[Tra
 async def create_goal(db: AsyncSession, user_id: str, sprint_id: str, data: TrackerGoalCreate) -> TrackerGoalOut:
     await _get_sprint_for_user(db, user_id, sprint_id)
     await _validate_parent_goal(db, user_id, sprint_id, data.level, data.section, data.parent_id)
-    hypothesis, deadline_date, status = _normalize_goal_payload(
-        data.level,
-        data.hypothesis.strip() if isinstance(data.hypothesis, str) else data.hypothesis,
-        data.deadline_date,
-        None,
-    )
     goal = TrackerGoal(
         user_id=user_id,
         sprint_id=sprint_id,
@@ -244,9 +232,10 @@ async def create_goal(db: AsyncSession, user_id: str, sprint_id: str, data: Trac
         level=data.level,
         parent_id=data.parent_id,
         title=data.title.strip(),
-        hypothesis=hypothesis,
-        deadline_date=deadline_date,
-        status=status,
+        target_baseline=data.target_baseline.strip() if isinstance(data.target_baseline, str) else data.target_baseline,
+        target_stretch=data.target_stretch.strip() if isinstance(data.target_stretch, str) else data.target_stretch,
+        deadline_date=data.deadline_date,
+        status=data.status,
         sort_order=data.sort_order,
     )
     db.add(goal)
@@ -259,17 +248,10 @@ async def patch_goal(db: AsyncSession, user_id: str, goal_id: str, data: Tracker
     goal = await _get_goal_for_user(db, user_id, goal_id)
     payload = data.model_dump(exclude_unset=True)
 
-    if "hypothesis" in payload and goal.level != 2:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Only level 2 goals can store a hypothesis")
-    if "deadline_date" in payload and goal.level != 3:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Only level 3 goals can store a deadline")
-    if "status" in payload and goal.level != 3:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Only level 3 goals can store a status")
-
     for field, value in payload.items():
         if field == "title" and value is not None:
             value = value.strip()
-        if field == "hypothesis" and isinstance(value, str):
+        if field in ("target_baseline", "target_stretch") and isinstance(value, str):
             value = value.strip() or None
         setattr(goal, field, value)
 

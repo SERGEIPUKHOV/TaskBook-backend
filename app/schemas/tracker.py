@@ -51,8 +51,10 @@ class TrackerGoalCreate(BaseModel):
     level: Literal[1, 2, 3]
     parent_id: str | None = None
     title: str = Field(min_length=1, max_length=2000)
-    hypothesis: str | None = None
+    target_baseline: str | None = None
+    target_stretch: str | None = None
     deadline_date: date | None = None
+    status: TrackerStatus | None = None
     sort_order: int = 0
 
 
@@ -60,7 +62,8 @@ class TrackerGoalPatch(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     title: str | None = Field(default=None, min_length=1, max_length=2000)
-    hypothesis: str | None = None
+    target_baseline: str | None = None
+    target_stretch: str | None = None
     deadline_date: date | None = None
     status: TrackerStatus | None = None
     sort_order: int | None = None
@@ -73,7 +76,8 @@ class TrackerGoalOut(BaseModel):
     level: int
     parent_id: str | None
     title: str
-    hypothesis: str | None
+    target_baseline: str | None
+    target_stretch: str | None
     deadline_date: date | None
     status: TrackerStatus | None
     sort_order: int

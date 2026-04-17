@@ -25,7 +25,8 @@ class TrackerGoal(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=True,
     )
     title: Mapped[str] = mapped_column(Text, nullable=False)
-    hypothesis: Mapped[str | None] = mapped_column(Text, nullable=True)
+    target_baseline: Mapped[str | None] = mapped_column(Text, nullable=True)
+    target_stretch: Mapped[str | None] = mapped_column(Text, nullable=True)
     deadline_date: Mapped[date | None] = mapped_column(Date, index=True, nullable=True)
     status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
