@@ -11,6 +11,7 @@ class UserOut(BaseModel):
     email: str
     is_active: bool
     is_admin: bool
+    tasktracker_enabled: bool
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)

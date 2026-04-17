@@ -8,6 +8,8 @@ from app.models.month_plan import MonthPlan
 from app.models.planner_link import PlannerLink
 from app.models.supervisor_grant import SupervisorGrant
 from app.models.task import Task, TaskDayStatus
+from app.models.tracker_goal import TrackerGoal
+from app.models.tracker_sprint import TrackerSprint
 from app.models.user import User
 from app.models.week import Week
 
@@ -25,6 +27,8 @@ __all__ = [
     "SupervisorGrant",
     "Task",
     "TaskDayStatus",
+    "TrackerGoal",
+    "TrackerSprint",
     "User",
     "Week",
 ]
