@@ -1,6 +1,16 @@
 from __future__ import annotations
 
+from datetime import date
+
+import app.services.task_service as task_service_module
+
 from tests.helpers import extract_data
+
+
+class MarchWeekToday(date):
+    @classmethod
+    def today(cls) -> "MarchWeekToday":
+        return cls(2026, 3, 10)
 
 
 async def test_week_tasks_and_day_entries_flow(client, auth_headers):
@@ -46,7 +56,8 @@ async def test_week_tasks_and_day_entries_flow(client, auth_headers):
     assert bundle["gratitudes"]["2026-03-09"]["content"] == "Thanks to the team"
 
 
-async def test_week_bundle_syncs_moved_tasks_without_duplicates(client, auth_headers):
+async def test_week_bundle_syncs_moved_tasks_without_duplicates(client, auth_headers, monkeypatch):
+    monkeypatch.setattr(task_service_module, "date", MarchWeekToday)
     initial_week_response = await client.get("/api/v1/weeks/2026/11", headers=auth_headers)
     assert initial_week_response.status_code == 200
 
@@ -107,18 +118,28 @@ async def test_week_bundle_syncs_moved_tasks_without_duplicates(client, auth_hea
     assert first_bundle_response.status_code == 200
     first_bundle = extract_data(first_bundle_response)
     carried_tasks = [task for task in first_bundle["tasks"] if task["carried_from_task_id"] == moved_task["id"]]
+    friday_carried_tasks = [task for task in first_bundle["tasks"] if task["carried_from_task_id"] == friday_moved_task["id"]]
+    untouched_carried_tasks = [task for task in first_bundle["tasks"] if task["carried_from_task_id"] == untouched_task["id"]]
     assert len(carried_tasks) == 1
+    assert len(friday_carried_tasks) == 1
+    assert len(untouched_carried_tasks) == 1
     assert carried_tasks[0]["title"] == "Carry me over"
     assert carried_tasks[0]["start_day"] == 1
     assert all(task["carried_from_task_id"] != done_task["id"] for task in first_bundle["tasks"])
-    assert all(task["carried_from_task_id"] != friday_moved_task["id"] for task in first_bundle["tasks"])
-    assert all(task["carried_from_task_id"] != untouched_task["id"] for task in first_bundle["tasks"])
 
     second_bundle_response = await client.get("/api/v1/weeks/2026/11/bundle", headers=auth_headers)
     assert second_bundle_response.status_code == 200
     second_bundle = extract_data(second_bundle_response)
     second_carried_tasks = [task for task in second_bundle["tasks"] if task["carried_from_task_id"] == moved_task["id"]]
+    second_friday_carried_tasks = [
+        task for task in second_bundle["tasks"] if task["carried_from_task_id"] == friday_moved_task["id"]
+    ]
+    second_untouched_carried_tasks = [
+        task for task in second_bundle["tasks"] if task["carried_from_task_id"] == untouched_task["id"]
+    ]
     assert len(second_carried_tasks) == 1
+    assert len(second_friday_carried_tasks) == 1
+    assert len(second_untouched_carried_tasks) == 1
 
 
 async def test_week_bundle_removes_carried_task_after_retroactive_source_change(client, auth_headers):
@@ -158,7 +179,8 @@ async def test_week_bundle_removes_carried_task_after_retroactive_source_change(
     assert all(task["carried_from_task_id"] != moved_task["id"] for task in second_bundle["tasks"])
 
 
-async def test_week_tasks_support_reorder_update_delete_and_status_reset(client, auth_headers):
+async def test_week_tasks_support_reorder_update_delete_and_status_reset(client, auth_headers, monkeypatch):
+    monkeypatch.setattr(task_service_module, "date", MarchWeekToday)
     first_task_response = await client.post(
         "/api/v1/weeks/2026/11/tasks",
         json={"title": "Task A", "time_planned": 15, "start_day": 1},

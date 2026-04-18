@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
 from sqlalchemy import and_, delete, or_, select
@@ -124,8 +124,176 @@ async def _task_status_map(db: AsyncSession, task_ids: list[str]) -> dict[str, d
     return statuses
 
 
+def _clamp_start_day(start_day: int | None) -> int:
+    return min(max(start_day or 1, 1), 7)
+
+
+def _has_terminal_status(task_statuses: dict[str, str]) -> bool:
+    return any(status in {"done", "failed"} for status in task_statuses.values())
+
+
+def _next_open_day(task: Task, week: Week, task_statuses: dict[str, str]) -> int | None:
+    if _has_terminal_status(task_statuses):
+        return None
+
+    for day_num in range(_clamp_start_day(task.start_day), 8):
+        status = task_statuses.get(date.fromisocalendar(week.year, week.week_number, day_num).isoformat())
+        if status == "moved":
+            continue
+        if status in {"done", "failed"}:
+            return None
+        return day_num
+
+    return 8
+
+
+async def _upsert_moved_status(
+    db: AsyncSession,
+    task: Task,
+    target_date: date,
+    task_statuses: dict[str, str],
+) -> bool:
+    target_key = target_date.isoformat()
+    if task_statuses.get(target_key) == "moved":
+        return False
+
+    result = await db.execute(
+        select(TaskDayStatus).where(TaskDayStatus.task_id == task.id, TaskDayStatus.date == target_date),
+    )
+    record = result.scalar_one_or_none()
+    if record is None:
+        record = TaskDayStatus(task_id=task.id, date=target_date, status="moved")
+    else:
+        record.status = "moved"
+
+    db.add(record)
+    task_statuses[target_key] = "moved"
+    return True
+
+
+async def _ensure_carry_task(
+    db: AsyncSession,
+    user_id: str,
+    canonical_id: str,
+    source_task: Task,
+    next_year: int,
+    next_week_number: int,
+) -> tuple[Task, Week, bool]:
+    next_week = await get_or_create_week(db, user_id, next_year, next_week_number)
+    next_task_result = await db.execute(
+        select(Task)
+        .where(
+            Task.user_id == user_id,
+            Task.week_id == next_week.id,
+            Task.carried_from_task_id == canonical_id,
+        )
+        .order_by(Task.created_at.desc())
+        .limit(1),
+    )
+    next_task = next_task_result.scalar_one_or_none()
+    if next_task is not None:
+        return next_task, next_week, False
+
+    next_task = Task(
+        user_id=user_id,
+        week_id=next_week.id,
+        title=source_task.title,
+        time_planned=source_task.time_planned,
+        time_actual=0,
+        is_priority=source_task.is_priority,
+        order=0,
+        start_day=1,
+        carried_from_task_id=canonical_id,
+        calendar_export_enabled=False,
+        calendar_export_bucket=None,
+    )
+    db.add(next_task)
+    await db.flush()
+    return next_task, next_week, True
+
+
+async def _auto_carry_overdue_tasks(db: AsyncSession, user_id: str) -> None:
+    today = date.today()
+    rows_result = await db.execute(
+        select(Task, Week)
+        .join(Week, Week.id == Task.week_id)
+        .where(Task.user_id == user_id)
+        .order_by(Week.year.asc(), Week.week_number.asc(), Task.created_at.asc()),
+    )
+    rows = rows_result.all()
+    if not rows:
+        return
+
+    task_ids = [task.id for task, _week in rows]
+    statuses_by_task = await _task_status_map(db, task_ids)
+    chain_map: dict[str, list[tuple[Task, Week]]] = {}
+    task_refs: dict[tuple[str, int, int], tuple[Task, Week]] = {}
+
+    for task, week in rows:
+        canonical_id = task.carried_from_task_id or task.id
+        chain_map.setdefault(canonical_id, []).append((task, week))
+        task_refs[(canonical_id, week.year, week.week_number)] = (task, week)
+
+    changed = False
+
+    for canonical_id, entries in chain_map.items():
+        entries.sort(key=lambda item: (item[1].year, item[1].week_number, item[0].created_at))
+        entry_index = 0
+
+        while entry_index < len(entries):
+            task, week = entries[entry_index]
+            week_start, week_end = week_bounds(week.year, week.week_number)
+            if week_start > today:
+                break
+
+            task_statuses = statuses_by_task.setdefault(task.id, {})
+            if _has_terminal_status(task_statuses):
+                break
+
+            open_day = _next_open_day(task, week, task_statuses)
+            if open_day is None:
+                break
+
+            target_day = 7 if week_end < today else today.isoweekday() - 1
+            if open_day <= target_day:
+                for day_num in range(open_day, target_day + 1):
+                    day_date = date.fromisocalendar(week.year, week.week_number, day_num)
+                    changed = await _upsert_moved_status(db, task, day_date, task_statuses) or changed
+
+            if week_end >= today:
+                break
+
+            next_week_date = week_end + timedelta(days=1)
+            next_year, next_week_number, _ = next_week_date.isocalendar()
+            next_ref = (canonical_id, next_year, next_week_number)
+            next_entry = task_refs.get(next_ref)
+            if next_entry is None:
+                if changed:
+                    await db.flush()
+                next_task, next_week, created = await _ensure_carry_task(
+                    db,
+                    user_id,
+                    canonical_id,
+                    task,
+                    next_year,
+                    next_week_number,
+                )
+                next_entry = (next_task, next_week)
+                entries.append(next_entry)
+                task_refs[next_ref] = next_entry
+                statuses_by_task.setdefault(next_task.id, {})
+                changed = created or changed
+
+            entry_index += 1
+
+    if changed:
+        await db.commit()
+        await invalidate_dashboard(user_id)
+
+
 async def list_week_tasks(db: AsyncSession, user_id: str, year: int, week_number: int) -> list[TaskOut]:
     week = await get_or_create_week(db, user_id, year, week_number)
+    await _auto_carry_overdue_tasks(db, user_id)
     tasks_result = await db.execute(
         select(Task)
         .where(Task.user_id == user_id, Task.week_id == week.id)
